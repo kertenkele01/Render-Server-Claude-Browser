@@ -15,6 +15,18 @@ app.use(express.urlencoded({ limit: '1mb', extended: true }));
 // ----------------------------------------------------
 // CONFIG
 // ----------------------------------------------------
+// Load a local .env when present. Hosted environments (Render) inject real
+// environment variables and have no .env file, so this is a no-op there.
+// process.loadEnvFile is built into Node 20.12+; older runtimes just skip it.
+try {
+    if (typeof process.loadEnvFile === 'function' && fs.existsSync(path.join(__dirname, '.env'))) {
+        process.loadEnvFile(path.join(__dirname, '.env'));
+        console.log('[Config] Loaded .env');
+    }
+} catch (e) {
+    console.warn('[Config] Could not read .env:', e.message);
+}
+
 const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
 const STATE_FILE = process.env.BRIDGE_STATE_FILE || path.join(__dirname, '.bridge-state.json');
 // MCP clients are not browsers, so no cross-origin access is required. Set
@@ -52,7 +64,6 @@ const pendingRequests = new Map(); // messageId -> { resolve, reject, timeout }
 // ----------------------------------------------------
 const devices = new Map(); // deviceId -> { secretHash }
 const clients = new Map(); // clientId -> { deviceId, secretHash, name }
-const pairingAttempts = new Map(); // ip -> { count, windowStart }
 
 function sha256(value) {
     return createHash('sha256').update(String(value)).digest('hex');
@@ -704,7 +715,6 @@ server.on('upgrade', (request, socket, head) => {
     });
 });
 
-const pendingPairings = new Map(); // pairingId -> { resolve, reject, timeout }
 
 // WebSocket Server Handler (for the Android app)
 wss.on('connection', (ws) => {
@@ -792,33 +802,19 @@ wss.on('connection', (ws) => {
             return;
         }
 
-        if (payload.type === 'pair_result') {
-            const pending = pendingPairings.get(payload.pairingId);
-            if (!pending) return;
-            clearTimeout(pending.timeout);
-            pendingPairings.delete(payload.pairingId);
-
-            if (payload.status === 'ok') {
-                const cid = String(payload.clientId || '').trim();
-                const hash = String(payload.secretHash || '').trim();
-                if (!cid || !/^[a-f0-9]{64}$/i.test(hash)) {
-                    return pending.reject(new Error('Cihaz geçersiz bir eşleştirme yanıtı döndürdü.'));
-                }
-                // We store only the hash; the plaintext secret is forwarded to
-                // the AI client once and never written down here.
-                clients.set(cid, { deviceId, secretHash: hash, name: String(payload.clientName || 'AI istemcisi').substring(0, 60) });
-                saveState();
-                addLog(cid, payload.clientName, deviceId, 'Eşleştirme Tamamlandı', 'success', 'Yeni istemci cihaza sabitlendi.');
-                pending.resolve({
-                    clientId: cid,
-                    clientSecret: payload.clientSecret,
-                    deviceId,
-                    permissions: payload.permissions || []
-                });
-            } else {
-                addLog(null, payload.clientName, deviceId, 'Eşleştirme Reddedildi', 'error', String(payload.reason || '').substring(0, 120));
-                pending.reject(new Error(payload.reason || 'Eşleştirme cihaz tarafından reddedildi.'));
-            }
+        // The device minted a credential locally and is telling us the hash so
+        // it works immediately, without waiting for the next register.
+        if (payload.type === 'client_added') {
+            const cid = String(payload.clientId || '').trim();
+            const hash = String(payload.secretHash || '').trim();
+            if (!cid || !/^[a-f0-9]{64}$/i.test(hash)) return;
+            clients.set(cid, {
+                deviceId,
+                secretHash: hash,
+                name: String(payload.name || 'AI istemcisi').substring(0, 60)
+            });
+            saveState();
+            addLog(cid, payload.name, deviceId, 'İstemci Eklendi', 'success', 'Cihaz yeni bir erişim anahtarı üretti.');
             return;
         }
 
@@ -867,62 +863,6 @@ setInterval(() => {
         }
     });
 }, 15000);
-
-// ----------------------------------------------------
-// PAIRING — the device mints the credential, we only relay and remember the
-// binding. The 6-digit code is validated on the phone, never here.
-// ----------------------------------------------------
-app.post('/pair', (req, res) => {
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
-    const now = Date.now();
-    const attempt = pairingAttempts.get(ip);
-    if (attempt && now - attempt.windowStart < 60000) {
-        if (attempt.count >= 5) {
-            return res.status(429).json({ error: 'rate_limited', message: 'Çok fazla eşleştirme denemesi. Bir dakika sonra tekrar deneyin.' });
-        }
-        attempt.count++;
-    } else {
-        pairingAttempts.set(ip, { count: 1, windowStart: now });
-    }
-
-    const code = String(req.body?.code || '').replace(/\D/g, '');
-    const clientName = String(req.body?.clientName || 'AI istemcisi').substring(0, 60);
-    if (code.length !== 6) {
-        return res.status(400).json({ error: 'bad_code', message: 'Altı haneli eşleştirme kodu gerekli.' });
-    }
-
-    const online = [...browsers.entries()].filter(([, ws]) => ws && ws.readyState === 1);
-    if (online.length === 0) {
-        return res.status(503).json({ error: 'no_device', message: 'Bağlı cihaz yok. Android uygulamasının açık olduğundan emin olun.' });
-    }
-
-    const pairingId = randomUUID();
-    const settle = new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            pendingPairings.delete(pairingId);
-            reject(new Error('Kod geçersiz veya süresi dolmuş.'));
-        }, 12000);
-        pendingPairings.set(pairingId, { resolve, reject, timeout });
-    });
-
-    // Only the device holding this code will answer.
-    online.forEach(([, ws]) => {
-        try { ws.send(JSON.stringify({ type: 'pair_request', pairingId, code, clientName })); } catch (e) {}
-    });
-
-    settle.then((result) => {
-        res.json({
-            status: 'paired',
-            clientId: result.clientId,
-            credential: `${result.clientId}.${result.clientSecret}`,
-            deviceId: result.deviceId,
-            permissions: result.permissions,
-            usage: "Bu değeri MCP istemcinizde 'Authorization: Bearer <credential>' başlığı olarak kullanın. Yalnızca bir kez gösterilir."
-        });
-    }).catch((err) => {
-        res.status(400).json({ error: 'pairing_failed', message: err.message });
-    });
-});
 
 // ----------------------------------------------------
 // 1. STANDARD MCP SSE TRANSPORT ENDPOINTS
@@ -1552,9 +1492,9 @@ app.get('/', (req, res) => {
 
   <div class="card">
     <h2>İstemci Kurulumu</h2>
-    <p class="sub">1 · Android uygulamasında <b>Ayarlar → MCP → AI istemcisi ekle</b> ile 6 haneli kod alın.</p>
-    <p class="sub">2 · <code>POST /pair</code> ucuna <code>{"code":"123456","clientName":"Cursor"}</code> gönderin ya da uygulamadaki "Kopyala" düğmesini kullanın.</p>
-    <p class="sub">3 · Dönen değeri MCP istemcinizde <code>Authorization: Bearer &lt;clientId&gt;.&lt;secret&gt;</code> olarak tanımlayın; SSE adresi <code id="sse"></code>.</p>
+    <p class="sub">1 · Android uygulamasında <b>Ayarlar → Oturumlar → AI istemcisi ekle</b> ile bir erişim anahtarı üretin.</p>
+    <p class="sub">2 · Anahtarı kopyalayın — yalnızca üretildiği anda görünür, cihaz sadece özetini saklar.</p>
+    <p class="sub">3 · MCP istemcinizde <code>Authorization: Bearer &lt;clientId&gt;.&lt;secret&gt;</code> olarak tanımlayın; SSE adresi <code id="sse"></code>.</p>
   </div>
 </div>
 
@@ -1643,8 +1583,8 @@ app.get('/healthz', (req, res) => res.json({ status: 'ok' }));
 // /oauth/register. They auto-approved every request, handed out one static
 // access token that was never checked, and redirected to an unvalidated
 // redirect_uri. They have been removed rather than patched: they provided the
-// appearance of authorization while granting none. Pairing (POST /pair) is now
-// the only way to obtain a credential.
+// appearance of authorization while granting none. A credential can now only
+// be minted on the device itself, which announces the hash over its WebSocket.
 
 // Start listening
 const PORT = process.env.PORT || 10000;
@@ -1653,7 +1593,7 @@ server.listen(PORT, () => {
     console.log(` MCP Bridge Server listening on port ${PORT}`);
     console.log(` - Console:  http://localhost:${PORT}/`);
     console.log(` - MCP SSE:  http://localhost:${PORT}/sse   (kimlik doğrulaması gerekli)`);
-    console.log(` - Pairing:  POST http://localhost:${PORT}/pair`);
+    console.log(``);
     console.log(` - Enrolled: ${devices.size} cihaz, ${clients.size} istemci`);
     if (!ADMIN_TOKEN) {
         console.warn(' ! ADMIN_TOKEN tanımlı değil — operatör konsolu kapalı.');

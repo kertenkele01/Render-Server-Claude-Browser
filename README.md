@@ -52,13 +52,19 @@ cp .env.example .env   # ADMIN_TOKEN doldur
 npm start
 ```
 
+`.env` dosyası açılışta otomatik okunur (Node 20.12+ yerleşik desteği). Token
+üretmek için:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
 ## Uçlar
 
 | Uç | Kimlik | Ne yapar |
 | --- | --- | --- |
 | `GET /sse` | İstemci | MCP SSE kanalı |
 | `POST /message` | İstemci | JSON-RPC araç çağrıları |
-| `POST /pair` | Yok (kod ile) | Eşleştirme kodunu kimlik bilgisine çevirir |
 | `GET /healthz` | Yok | Sağlık kontrolü |
 | `GET /` | ADMIN_TOKEN | Operatör konsolu |
 | `GET /api/status` | ADMIN_TOKEN | Cihazlar, istemciler, son işlemler |
@@ -68,9 +74,14 @@ npm start
 
 MCP istemcileri `Authorization: Bearer <clientId>.<secret>` gönderir.
 
-Bu değeri **telefon** üretir: kullanıcı uygulamada bir eşleştirme kodu alır,
-istemci kodu `POST /pair` ile kullanır ve kimlik bilgisini **bir kez** alır.
-Sunucu yalnızca `sha256(secret)` ve `clientId → deviceId` bağını saklar.
+Bu değeri **telefon** üretir: kullanıcı uygulamada *Ayarlar → Oturumlar → AI
+istemcisi ekle* der, cihaz anahtarı oluşturup **bir kez** gösterir, kullanıcı
+kopyalayıp MCP yapılandırmasına yapıştırır. Anahtar kalıcıdır.
+
+Telefon yalnızca `sha256(secret)` saklar ve bu özeti röleye `client_added`
+mesajıyla bildirir (ayrıca her yeniden bağlanmada tüm listeyi yayınlar). Röle
+de yalnızca hash'i ve `clientId → deviceId` bağını tutar — düz metin sır
+hiçbir yerde saklanmaz.
 
 Rastgele veya uydurma bir token ile bağlanmak mümkün değildir: `clientId`
 kayıtlı değilse istek 401 döner, kayıtlıysa da telefon sırrı kendi defterine
@@ -85,6 +96,6 @@ oturum açılmış tarayıcı trafiği taşıyor ve log en kolay sızan şey.
 ## Bilinen sınırlar
 
 - Tek instance zorunlu (yukarıya bakın)
-- Araç çağrılarında hız sınırı yok — yalnızca `/pair` sınırlı
+- Araç çağrılarında hız sınırı yok
 - Ücretsiz planda servis hareketsizlikte uykuya geçer; uygulama otomatik
   yeniden bağlanır ama ilk komutta soğuk başlangıç gecikmesi olur
