@@ -1,0 +1,16 @@
+node_modules/
+npm-debug.log*
+
+# Environment (.env.example IS committed, .env is not)
+.env
+.env.local
+.env.*.local
+
+# Relay identity registry: device and client secret hashes plus the
+# clientId -> deviceId bindings.
+.bridge-state.json
+*.bridge-state.json
+
+# Test artifacts
+.smoke-test.js
+.crawl-test.js

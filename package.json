@@ -1,0 +1,24 @@
+{
+  "name": "ai-browser-bridge-server",
+  "version": "1.0.0",
+  "description": "MCP bridge relay connecting AI clients to the AI Browser Android app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "android",
+    "bridge",
+    "model-context-protocol"
+  ],
+  "author": "",
+  "license": "ISC"
+}
