@@ -28,6 +28,12 @@ services:
       - key: ADMIN_TOKEN
         generateValue: true
 
+      # Set to "true" to drop the console login entirely. Read-only either way,
+      # but it publishes paired clients and the hosts the phone visits, so this
+      # is an opt-in you make knowingly. sync:false keeps it out of git.
+      - key: ADMIN_PUBLIC
+        sync: false
+
       # Origins allowed to call the bridge from a browser and to open a
       # WebSocket. MCP clients are not browsers, so empty is correct unless you
       # deliberately front the bridge with a web app.

@@ -34,6 +34,13 @@ const ADMIN_TOKEN_MIN_LENGTH = 24;
 const RAW_ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
 const ADMIN_TOKEN_TOO_SHORT = RAW_ADMIN_TOKEN.length > 0 && RAW_ADMIN_TOKEN.length < ADMIN_TOKEN_MIN_LENGTH;
 const ADMIN_TOKEN = ADMIN_TOKEN_TOO_SHORT ? '' : RAW_ADMIN_TOKEN;
+
+// ADMIN_PUBLIC opens the operator console to anyone who knows the URL. It is a
+// deliberate opt-in, never a default: the console is read-only and exposes no
+// secret, but it does list paired clients and a live feed of the hosts this
+// phone is visiting. That is browsing history, and a Render URL is guessable.
+// Set it only on a deployment you are comfortable being public.
+const ADMIN_PUBLIC = /^(1|true|yes|on)$/i.test((process.env.ADMIN_PUBLIC || '').trim());
 const STATE_FILE = process.env.BRIDGE_STATE_FILE || path.join(__dirname, '.bridge-state.json');
 // MCP clients are not browsers, so no cross-origin access is required. Set
 // ALLOWED_ORIGINS only if you deliberately front the bridge with a web app.
@@ -1456,13 +1463,15 @@ app.all(['/mcp/tools/browser_get_tool_documentation', '/tools/browser_get_tool_d
 // Operator status endpoint. Requires ADMIN_TOKEN; without one configured the
 // endpoint stays closed rather than defaulting to public.
 app.get('/api/status', (req, res) => {
-    if (!ADMIN_TOKEN) {
-        return res.status(503).json({ error: 'admin_disabled', message: 'ADMIN_TOKEN ortam değişkeni tanımlı değil; izleme paneli kapalı.' });
-    }
-    const header = req.headers['authorization'] || '';
-    const provided = header.toLowerCase().startsWith('bearer ') ? header.substring(7).trim() : (req.headers['x-admin-token'] || '');
-    if (!safeEquals(provided, ADMIN_TOKEN)) {
-        return res.status(401).json({ error: 'unauthorized' });
+    if (!ADMIN_PUBLIC) {
+        if (!ADMIN_TOKEN) {
+            return res.status(503).json({ error: 'admin_disabled', message: 'ADMIN_TOKEN ortam değişkeni tanımlı değil; izleme paneli kapalı.' });
+        }
+        const header = req.headers['authorization'] || '';
+        const provided = header.toLowerCase().startsWith('bearer ') ? header.substring(7).trim() : (req.headers['x-admin-token'] || '');
+        if (!safeEquals(provided, ADMIN_TOKEN)) {
+            return res.status(401).json({ error: 'unauthorized' });
+        }
     }
     res.json({
         status: "running",
@@ -1523,7 +1532,7 @@ app.get('/', (req, res) => {
     <p class="sub">Bu köprü kimlik doğrulaması gerektirir. AI istemcileri Android uygulamasından alınan eşleştirme kodu ile bağlanır.</p>
   </div>
 
-  <div class="card">
+  <div class="card" id="login">
     <h2>Operatör Girişi</h2>
     <div class="row">
       <input id="tok" type="password" placeholder="ADMIN_TOKEN" autocomplete="off">
@@ -1560,6 +1569,8 @@ app.get('/', (req, res) => {
 
   var token = sessionStorage.getItem('mcp_admin') || '';
   var timer = null;
+  // Server-side flag: when the console is public there is nothing to log in to.
+  var PUBLIC = ${ADMIN_PUBLIC ? 'true' : 'false'};
 
   function el(tag, cls, text){
     var n = document.createElement(tag);
@@ -1593,7 +1604,7 @@ app.get('/', (req, res) => {
 
   async function refresh(){
     try{
-      var r = await fetch('/api/status', { headers: { 'Authorization': 'Bearer ' + token } });
+      var r = await fetch('/api/status', PUBLIC ? {} : { headers: { 'Authorization': 'Bearer ' + token } });
       if (r.status === 401){ stop('Token geçersiz.'); return; }
       if (r.status === 503){ stop('Sunucuda ADMIN_TOKEN tanımlı değil.'); return; }
       if (!r.ok){ return; }
@@ -1617,9 +1628,11 @@ app.get('/', (req, res) => {
   }
 
   function start(){
-    token = document.getElementById('tok').value.trim() || token;
-    if (!token){ document.getElementById('msg').textContent = 'Token girin.'; return; }
-    sessionStorage.setItem('mcp_admin', token);
+    if (!PUBLIC){
+      token = document.getElementById('tok').value.trim() || token;
+      if (!token){ document.getElementById('msg').textContent = 'Token girin.'; return; }
+      sessionStorage.setItem('mcp_admin', token);
+    }
     refresh();
     clearInterval(timer);
     timer = setInterval(refresh, 3000);
@@ -1627,7 +1640,12 @@ app.get('/', (req, res) => {
 
   document.getElementById('go').addEventListener('click', start);
   document.getElementById('tok').addEventListener('keydown', function(e){ if (e.key === 'Enter') start(); });
-  if (token) start();
+  if (PUBLIC){
+    document.getElementById('login').hidden = true;
+    start();
+  } else if (token) {
+    start();
+  }
 </script>
 </body>
 </html>`);
@@ -1652,7 +1670,11 @@ server.listen(PORT, () => {
     console.log(` - MCP SSE:  http://localhost:${PORT}/sse   (kimlik doğrulaması gerekli)`);
     console.log(``);
     console.log(` - Enrolled: ${devices.size} cihaz, ${clients.size} istemci`);
-    if (ADMIN_TOKEN_TOO_SHORT) {
+    if (ADMIN_PUBLIC) {
+        console.warn(' ! ADMIN_PUBLIC açık — operatör konsolu herkese açık.');
+        console.warn('   Panel salt okunurdur ve sır göstermez, ama eşleşmiş istemcileri ve');
+        console.warn('   ziyaret edilen alan adlarını listeler. Kapatmak için ADMIN_PUBLIC=false.');
+    } else if (ADMIN_TOKEN_TOO_SHORT) {
         console.warn(` ! ADMIN_TOKEN ${ADMIN_TOKEN_MIN_LENGTH} karakterden kısa — yok sayıldı, operatör konsolu kapalı.`);
         console.warn('   Üretmek için: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
     } else if (!ADMIN_TOKEN) {
