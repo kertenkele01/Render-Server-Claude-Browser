@@ -192,7 +192,7 @@ const TOOLS = [
     },
     {
         name: "browser_screenshot",
-        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. Sekme telefonda görüntülenmiyor olsa da (arka plan sekmesi) ve uygulama arka planda olsa da çalışır. Video, WebGL ve bazı canvas içerikleri boş çıkabilir; bu durumda sayfayı 'browser_get_local_markdown' ile okuyun.",
+        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. Android yalnızca ekranda olan bir WebView'ı çizdiği için: sekme ekrandaysa doğrudan alınır; arka plandaki bir sekme için uygulama telefonda açıksa cihaz o sekmeyi bir anlığına ekrana alır, görüntüyü çeker ve ekranı eski haline döndürür (yanıtta 'captured_by_showing_tab' true olur). Uygulama ön planda değilse 'blank_capture' hatası döner — sayfa yüklüdür, yalnızca çizilmemiştir; içeriği 'browser_get_local_markdown' ile okuyun. Video, WebGL ve bazı canvas içerikleri ekrandayken bile boş çıkabilir.",
         inputSchema: {
             type: "object",
             properties: {
@@ -474,14 +474,14 @@ const TOOL_DOCUMENTATION = {
         browser_screenshot: {
             name: "browser_screenshot",
             category: "content_extraction",
-            summary: "Sekmenin JPEG görüntüsünü MCP görüntü bloğu olarak döner. Arka plan sekmesinde ve uygulama arka plandayken de çalışır.",
+            summary: "Sekmenin JPEG görüntüsünü MCP görüntü bloğu olarak döner. Uygulama telefonda açıkken arka plandaki sekmeler için de çalışır: cihaz sekmeyi bir anlığına ekrana alıp geri döner.",
             parameters: {
                 fullPage: "(Opsiyonel, Boolean) Varsayılan false. true ise sayfanın tamamı yakalanır.",
                 tabId: "(Opsiyonel, String) Hedef sekme; verilmezse oturumun aktif sekmesi.",
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
             best_practice: "Sayfanın yapısını anlamak için önce 'browser_get_local_markdown' kullanın — metin hem daha ucuz hem daha kesindir. Ekran görüntüsünü, yerleşimi görmeniz gereken durumlarda (bir öğe gerçekten görünüyor mu, bir grafik neye benziyor, tıklama doğru yere gitti mi) tercih edin. Yanıttaki 'full_page' alanı tam sayfa mı yoksa yalnızca görünen alan mı alındığını söyler; 'browser_toggle_overlay' ile birlikte kullanırsanız tıklanabilir öğelerin numaraları da görüntüde görünür.",
-            limitations: "Görüntü 720 piksel genişliğe ölçeklenir ve JPEG olarak sıkıştırılır. Video, WebGL ve GPU ile birleştirilen bazı canvas içerikleri boş çıkabilir; bu durumda sayfayı metin olarak okuyun."
+            limitations: "Uygulama ön planda değilken hiçbir sekme çizilmez ve 'blank_capture' döner; bu durumda içeriği metin olarak okuyun. Ekrana alma birkaç yüz milisaniye sürer ve kullanıcının ekranı o an kısaca değişir, bu yüzden döngü içinde çağırmayın. Aynı anda yalnızca bir ekrana alma yapılabilir. Tam sayfa yakalama yalnızca ekran dışı çizimde mümkündür; ekrana alınarak çekilen görüntülerde yalnızca görünen alan gelir. Görüntü 720 piksel genişliğe ölçeklenir ve JPEG olarak sıkıştırılır. Video, WebGL ve GPU ile birleştirilen bazı canvas içerikleri boş çıkabilir."
         },
         browser_toggle_overlay: {
             name: "browser_toggle_overlay",

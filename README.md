@@ -102,6 +102,10 @@ Röle bu kararların hiçbirini vermez, ama araç yanıtlarında karşılığın
   komut çalışmaz; ajanın `browser_new_tab` ile başka sekmeye geçmesi gerekir.
 - **Boş sekme.** Ana sayfaya dönmüş bir sekmede sayfa araçları, ne yapılması
   gerektiğini anlatan bir metin döndürür.
+- **Ekran görüntüsü.** Android yalnızca ekranda olan bir WebView'ı çizer. Arka
+  plandaki bir sekme için cihaz, uygulama telefonda açıksa sekmeyi bir anlığına
+  ekrana alıp görüntüyü çeker ve ekranı eski haline döndürür; uygulama ön planda
+  değilse `blank_capture` döner. Röle bu yanıtı yalnızca taşır.
 
 ## Deploy sonrası
 
