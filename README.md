@@ -75,17 +75,39 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 MCP istemcileri `Authorization: Bearer <clientId>.<secret>` gönderir.
 
 Bu değeri **telefon** üretir: kullanıcı uygulamada *Ayarlar → Oturumlar → AI
-istemcisi ekle* der, cihaz anahtarı oluşturup **bir kez** gösterir, kullanıcı
-kopyalayıp MCP yapılandırmasına yapıştırır. Anahtar kalıcıdır.
+istemcisi ekle* der, cihaz anahtarı oluşturur ve gösterir, kullanıcı kopyalayıp
+MCP yapılandırmasına yapıştırır. Anahtar kalıcıdır ve istemci kartından
+istenildiği zaman tekrar kopyalanabilir; sızma şüphesinde aynı karttan
+yenilenir (kimlik, çerez profili ve izinler korunur, yalnızca sır değişir).
 
-Telefon yalnızca `sha256(secret)` saklar ve bu özeti röleye `client_added`
-mesajıyla bildirir (ayrıca her yeniden bağlanmada tüm listeyi yayınlar). Röle
-de yalnızca hash'i ve `clientId → deviceId` bağını tutar — düz metin sır
-hiçbir yerde saklanmaz.
+Telefon röleye **yalnızca `sha256(secret)`** bildirir — `client_added` mesajıyla,
+ayrıca her yeniden bağlanmada tüm listeyi yayınlar. Röle yalnızca hash'i ve
+`clientId → deviceId` bağını tutar; **düz metin sır röleye hiçbir zaman
+yazılmaz.** Düz metni yalnızca telefon, kendi uygulamasına özel deposunda tutar
+(anahtarın tekrar kopyalanabilmesi için bilinçli bir tercih).
 
 Rastgele veya uydurma bir token ile bağlanmak mümkün değildir: `clientId`
 kayıtlı değilse istek 401 döner, kayıtlıysa da telefon sırrı kendi defterine
 karşı ayrıca doğrular.
+
+## Onay ve engeller (cihaz tarafı)
+
+Röle bu kararların hiçbirini vermez, ama araç yanıtlarında karşılığını görürsün:
+
+- **Anlık onay.** Oturum verisi silme, JavaScript çalıştırma ve kişisel bilgi
+  alanlarını doldurma telefonda kullanıcı onayı ister; 30 saniyede yanıt yoksa
+  reddedilir. Şifre ve ödeme alanları ayrı bir izne (`sensitive_fields`,
+  varsayılan kapalı) bağlıdır.
+- **Devralma.** Kullanıcı bir sekmeyi devralırsa o sekmede okuma dahil hiçbir
+  komut çalışmaz; ajanın `browser_new_tab` ile başka sekmeye geçmesi gerekir.
+- **Boş sekme.** Ana sayfaya dönmüş bir sekmede sayfa araçları, ne yapılması
+  gerektiğini anlatan bir metin döndürür.
+
+## Deploy sonrası
+
+Sunucu `SIGTERM`/`SIGINT` aldığında durumu diske yazar, MCP oturumlarını
+kapatır ve telefonlara 1001 ("going away") gönderir; telefon bunu arıza değil
+yeniden başlatma sayar ve normal backoff'uyla hemen bağlanır.
 
 ## Loglar
 
@@ -96,6 +118,8 @@ oturum açılmış tarayıcı trafiği taşıyor ve log en kolay sızan şey.
 ## Bilinen sınırlar
 
 - Tek instance zorunlu (yukarıya bakın)
-- Araç çağrılarında hız sınırı yok
+- Rölede hız sınırı yok. Eşzamanlılık sınırı **cihazda**: bir istemci aynı anda
+  en fazla 3 komut çalıştırabilir, dördüncü `too_many_requests` ile reddedilir.
+  Bir komutun gerçekten bittiğini yalnızca telefon bildiği için bu karar orada.
 - Ücretsiz planda servis hareketsizlikte uykuya geçer; uygulama otomatik
   yeniden bağlanır ama ilk komutta soğuk başlangıç gecikmesi olur

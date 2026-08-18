@@ -27,7 +27,13 @@ try {
     console.warn('[Config] Could not read .env:', e.message);
 }
 
-const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+// A short admin token is worse than none: it looks like a lock while being
+// guessable, and /api/status has no attempt limit behind it. Anything under 24
+// characters is treated as unset, loudly, rather than quietly accepted.
+const ADMIN_TOKEN_MIN_LENGTH = 24;
+const RAW_ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+const ADMIN_TOKEN_TOO_SHORT = RAW_ADMIN_TOKEN.length > 0 && RAW_ADMIN_TOKEN.length < ADMIN_TOKEN_MIN_LENGTH;
+const ADMIN_TOKEN = ADMIN_TOKEN_TOO_SHORT ? '' : RAW_ADMIN_TOKEN;
 const STATE_FILE = process.env.BRIDGE_STATE_FILE || path.join(__dirname, '.bridge-state.json');
 // MCP clients are not browsers, so no cross-origin access is required. Set
 // ALLOWED_ORIGINS only if you deliberately front the bridge with a web app.
@@ -89,18 +95,31 @@ function loadState() {
 }
 
 let saveTimer = null;
+
+/** The actual write. Synchronous so shutdown can call it and be sure. */
+function writeStateNow() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    try {
+        fs.writeFileSync(STATE_FILE, JSON.stringify({
+            devices: Object.fromEntries(devices),
+            clients: Object.fromEntries(clients)
+        }), 'utf8');
+    } catch (e) {
+        console.error('[State] Could not persist state file:', e.message);
+    }
+}
+
+/**
+ * Coalesces the writes a burst of registrations would cause.
+ *
+ * The debounce is why shutdown has to flush explicitly: a pairing announced in
+ * the last quarter second before a redeploy would otherwise be lost with the
+ * timer.
+ */
 function saveState() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-        try {
-            fs.writeFileSync(STATE_FILE, JSON.stringify({
-                devices: Object.fromEntries(devices),
-                clients: Object.fromEntries(clients)
-            }), 'utf8');
-        } catch (e) {
-            console.error('[State] Could not persist state file:', e.message);
-        }
-    }, 250);
+    saveTimer = setTimeout(writeStateNow, 250);
 }
 loadState();
 
@@ -169,6 +188,18 @@ const TOOLS = [
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             },
             required: ["query"]
+        }
+    },
+    {
+        name: "browser_screenshot",
+        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. Sekme telefonda görüntülenmiyor olsa da (arka plan sekmesi) ve uygulama arka planda olsa da çalışır. Video, WebGL ve bazı canvas içerikleri boş çıkabilir; bu durumda sayfayı 'browser_get_local_markdown' ile okuyun.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                fullPage: { type: "boolean", description: "true ise yalnızca görünen alan yerine sayfanın tamamı yakalanır. Telefonda o an ekranda olan sekmede yok sayılır (yanıt 'full_page' alanında hangisinin alındığını bildirir)." },
+                tabId: { type: "string", description: "Hedef sekme ID'si (opsiyonel, verilmezse oturumun aktif sekmesi)" },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            }
         }
     },
     {
@@ -353,6 +384,9 @@ const TOOL_DOCUMENTATION = {
             "Çoklu Sekme (Multi-Tab) yönetimi ve DOM kaynağı alma"
         ],
         security_note: "Her istemci cihaz tarafından üretilen kalıcı bir kimliğe ve kendi izole çerez profiline sabitlenmiştir. Profil veya oturum değiştirilemez. 'execute_js' ve 'clear_data' yetkileri varsayılan olarak kapalıdır; kullanıcı telefondan açmadıkça bu çağrılar reddedilir. Sahip olduğunuz izinleri 'browser_get_session_info' ile görebilirsiniz.",
+        approval_note: "Bazı işlemler izniniz olsa bile cihaz sahibine sorulur: 'browser_execute_js', 'browser_clear_session_data' ve kişisel bilgi alanlarına (e-posta, telefon, adres, kimlik) yazma. Kullanıcı 30 saniye içinde yanıtlamazsa istek reddedilir — bu normaldir, aynı komutu döngüye sokmayın; kullanıcıya ne yapmak istediğinizi açıklayıp tekrar deneyin. Şifre, doğrulama kodu ve ödeme alanları ayrı bir izne ('sensitive_fields') bağlıdır: izin kapalıyken doldurulamaz, açıkken de varsayılan olarak her doldurma için ayrı onay istenir.",
+        concurrency_note: "Aynı anda en fazla 3 komutunuz çalışabilir; dördüncü komut 'too_many_requests' hatasıyla reddedilir. Bu bir ceza değil, telefonun pilini ve belleğini koruyan bir sınır: yanıtları bekleyip devam edin. Onay bekleyen bir komut da yanıtlanana (veya 30 saniyede reddedilene) kadar sıradaki yerini korur.",
+        takeover_note: "Kullanıcı bir sekmeyi 'devralabilir'. Devralınan sekmede okuma dahil hiçbir komut çalışmaz ve hata mesajı bunu açıkça söyler. Bu durumda 'browser_new_tab' ile başka bir sekmede çalışmaya devam edin. Hangi sekmelerin kullanıcıda olduğunu 'browser_get_session_info' yanıtındaki 'heldByUser' alanından görebilirsiniz.",
         meta_tool_note: "İstediğiniz zaman 'browser_get_tool_documentation' aracını çağırarak spesifik bir araç veya kategori hakkında detaylı kılavuz alabilirsiniz."
     },
     categories: {
@@ -366,7 +400,7 @@ const TOOL_DOCUMENTATION = {
         },
         content_extraction: {
             name: "İçerik Okuma",
-            tools: ["browser_get_markdown", "browser_get_local_markdown", "browser_get_html"]
+            tools: ["browser_get_markdown", "browser_get_local_markdown", "browser_get_html", "browser_screenshot"]
         },
         tabs_and_sessions: {
             name: "Sekme & Oturum Bilgisi",
@@ -437,6 +471,18 @@ const TOOL_DOCUMENTATION = {
             },
             best_practice: "Spesifik DOM elementlerini, form input id/name etiketlerini veya karmaşık CSS seçicilerini bulmak gerektiğinde kullanın."
         },
+        browser_screenshot: {
+            name: "browser_screenshot",
+            category: "content_extraction",
+            summary: "Sekmenin JPEG görüntüsünü MCP görüntü bloğu olarak döner. Arka plan sekmesinde ve uygulama arka plandayken de çalışır.",
+            parameters: {
+                fullPage: "(Opsiyonel, Boolean) Varsayılan false. true ise sayfanın tamamı yakalanır.",
+                tabId: "(Opsiyonel, String) Hedef sekme; verilmezse oturumun aktif sekmesi.",
+                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
+            },
+            best_practice: "Sayfanın yapısını anlamak için önce 'browser_get_local_markdown' kullanın — metin hem daha ucuz hem daha kesindir. Ekran görüntüsünü, yerleşimi görmeniz gereken durumlarda (bir öğe gerçekten görünüyor mu, bir grafik neye benziyor, tıklama doğru yere gitti mi) tercih edin. Yanıttaki 'full_page' alanı tam sayfa mı yoksa yalnızca görünen alan mı alındığını söyler; 'browser_toggle_overlay' ile birlikte kullanırsanız tıklanabilir öğelerin numaraları da görüntüde görünür.",
+            limitations: "Görüntü 720 piksel genişliğe ölçeklenir ve JPEG olarak sıkıştırılır. Video, WebGL ve GPU ile birleştirilen bazı canvas içerikleri boş çıkabilir; bu durumda sayfayı metin olarak okuyun."
+        },
         browser_toggle_overlay: {
             name: "browser_toggle_overlay",
             category: "interaction",
@@ -465,7 +511,7 @@ const TOOL_DOCUMENTATION = {
                 text: "(Zorunlu, String) Girilecek metin (örn. 'Ali Veli' veya '2026-08-15')"
             },
             example_call: { selector: "input[type='search']", text: "Antalya Otelleri" },
-            best_practice: "Yazı yazdıktan sonra formu göndermek için ilgili butona 'browser_click' yapın veya 'browser_execute_js' ile form.submit() tetikleyin."
+            best_practice: "Yazı yazdıktan sonra formu göndermek için ilgili butona 'browser_click' yapın veya 'browser_execute_js' ile form.submit() tetikleyin. Kişisel bilgi alanları (e-posta, telefon, adres, kimlik, doğum tarihi) telefonda kullanıcı onayı ister. Şifre, doğrulama kodu ve ödeme alanları için 'sensitive_fields' izni gerekir; izniniz yoksa kullanıcıdan telefondan açmasını isteyin, izin açıkken de her doldurma için ayrıca onay çıkabilir."
         },
         browser_scroll: {
             name: "browser_scroll",
@@ -483,7 +529,7 @@ const TOOL_DOCUMENTATION = {
             parameters: {
                 script: "(Zorunlu, String) Çalıştırılacak JS kodu (örn. 'document.title' veya 'window.location.href')"
             },
-            best_practice: "Özel DOM sorguları, çerez okuma, sayfa içi hesaplamalar veya karmaşık tetikleyiciler için kullanın."
+            best_practice: "Özel DOM sorguları, çerez okuma, sayfa içi hesaplamalar veya karmaşık tetikleyiciler için kullanın. Bu araç varsayılan olarak her çağrıda telefonda kullanıcı onayı ister (30 saniyede yanıt yoksa reddedilir), bu yüzden onu bir döngü içinde değil, tek ve amaçlı çağrılarla kullanın."
         },
         browser_new_tab: {
             name: "browser_new_tab",
@@ -519,9 +565,9 @@ const TOOL_DOCUMENTATION = {
         browser_get_session_info: {
             name: "browser_get_session_info",
             category: "tabs_and_sessions",
-            summary: "Kendi oturumunuzun kimliğini, adını, açık sekme sayısını ve cihazın size verdiği izinleri döner.",
+            summary: "Kendi oturumunuzun kimliğini, adını, açık sekme sayısını, cihazın size verdiği izinleri, ekran modunu ('viewMode') ve kullanıcının devraldığı sekmeleri ('heldByUser') döner.",
             parameters: {},
-            best_practice: "Bir işe başlamadan önce hangi izinlere sahip olduğunuzu buradan doğrulayın; kapalı bir yetkiyi çağırmak yerine kullanıcıdan telefondan açmasını isteyin."
+            best_practice: "Bir işe başlamadan önce hangi izinlere sahip olduğunuzu buradan doğrulayın; kapalı bir yetkiyi çağırmak yerine kullanıcıdan telefondan açmasını isteyin. Bir sekme yanıt vermiyorsa 'heldByUser' listesine bakın: kullanıcı o sekmeyi devralmış olabilir."
         },
         browser_list_sessions: {
             name: "browser_list_sessions",
@@ -539,7 +585,7 @@ const TOOL_DOCUMENTATION = {
                 clearCache: "(Opsiyonel, Boolean) Varsayılan: true",
                 clearHistory: "(Opsiyonel, Boolean) Varsayılan: true"
             },
-            best_practice: "'clear_data' izni varsayılan olarak kapalıdır. Yalnızca kendi profilinize uygulanır; başka bir oturumun verisi silinemez."
+            best_practice: "'clear_data' izni varsayılan olarak kapalıdır ve izin açık olsa bile her çağrıda telefonda kullanıcı onayı istenir; 30 saniyede yanıt gelmezse reddedilir. Yalnızca kendi profilinize uygulanır; başka bir oturumun verisi silinemez."
         }
     },
     playbooks: [
@@ -1048,12 +1094,7 @@ app.post('/message', async (req, res) => {
             case "browser_get_session_info": actionType = "get_session_info"; break;
             case "browser_list_sessions": actionType = "list_sessions"; break;
             case "browser_clear_session_data": actionType = "clear_session_data"; break;
-            case "browser_screenshot":
-                reply({
-                    isError: true,
-                    content: [{ type: "text", text: "browser_screenshot şu an desteklenmiyor. Sayfa durumunu görmek için 'browser_get_local_markdown' kullanın." }]
-                });
-                return res.status(200).send("accepted");
+            case "browser_screenshot": actionType = "screenshot"; break;
             case "browser_switch_session":
                 reply({
                     isError: true,
@@ -1078,9 +1119,25 @@ app.post('/message', async (req, res) => {
             const parts = [`${Date.now() - startedAt} ms`];
             if (typeof responseData.markdown === 'string') parts.push(`${responseData.markdown.length} karakter markdown`);
             if (typeof responseData.html === 'string') parts.push(`${responseData.html.length} karakter html`);
+            if (typeof responseData.byte_size === 'number') parts.push(`${Math.round(responseData.byte_size / 1024)} KB görüntü`);
             const host = hostOf(responseData.url);
             if (host) parts.push(host);
             addLog(auth.clientId, clientName, boundDeviceId, `Tamamlandı: ${toolName}`, 'success', parts.join(' · '));
+
+            // An image comes back as an MCP image block, not as base64 buried in
+            // a JSON string: the client has to be able to actually look at it.
+            // The base64 is stripped from the metadata half so the payload is
+            // not carried twice.
+            if (typeof responseData.image_base64 === 'string' && responseData.image_base64.length > 0) {
+                const { image_base64, ...meta } = responseData;
+                reply({
+                    content: [
+                        { type: "image", data: image_base64, mimeType: responseData.mime_type || "image/jpeg" },
+                        { type: "text", text: JSON.stringify(meta, null, 2) }
+                    ]
+                });
+                return res.status(200).send("accepted");
+            }
 
             reply({ content: [{ type: "text", text: JSON.stringify(responseData, null, 2) }] });
         } catch (error) {
@@ -1595,8 +1652,60 @@ server.listen(PORT, () => {
     console.log(` - MCP SSE:  http://localhost:${PORT}/sse   (kimlik doğrulaması gerekli)`);
     console.log(``);
     console.log(` - Enrolled: ${devices.size} cihaz, ${clients.size} istemci`);
-    if (!ADMIN_TOKEN) {
+    if (ADMIN_TOKEN_TOO_SHORT) {
+        console.warn(` ! ADMIN_TOKEN ${ADMIN_TOKEN_MIN_LENGTH} karakterden kısa — yok sayıldı, operatör konsolu kapalı.`);
+        console.warn('   Üretmek için: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+    } else if (!ADMIN_TOKEN) {
         console.warn(' ! ADMIN_TOKEN tanımlı değil — operatör konsolu kapalı.');
     }
     console.log('=================================================');
 });
+
+// ----------------------------------------------------
+// GRACEFUL SHUTDOWN
+// Render sends SIGTERM on every deploy. Without this the process dies mid-flight:
+// the debounced state write is lost with its timer, phones see a dead socket
+// instead of a close frame (so they wait for the 45-second watchdog instead of
+// reconnecting at once), and MCP clients are left holding an SSE stream that
+// will never answer again.
+// ----------------------------------------------------
+let shuttingDown = false;
+
+function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Shutdown] ${signal} alındı, kapanılıyor...`);
+
+    // Flush first: everything below can fail without costing us the registry.
+    writeStateNow();
+
+    // Stop taking new work before tearing down the old.
+    server.close(() => {
+        console.log('[Shutdown] HTTP sunucusu kapandı.');
+        process.exit(0);
+    });
+
+    sseSessions.forEach((session, sessionId) => {
+        try {
+            session.res.write('event: message\ndata: {"jsonrpc":"2.0","method":"notifications/cancelled","params":{"reason":"server_restarting"}}\n\n');
+            session.res.end();
+        } catch (e) {}
+        sseSessions.delete(sessionId);
+    });
+
+    // 1001 "going away" tells the phone this is a restart, not a fault, so it
+    // reconnects on its normal backoff instead of the stuck-socket path.
+    browsers.forEach((ws) => {
+        try { ws.close(1001, 'Sunucu yeniden başlatılıyor'); } catch (e) {}
+    });
+    try { wss.close(); } catch (e) {}
+
+    // Some sockets never finish closing. Do not hold a deploy hostage for them.
+    setTimeout(() => {
+        console.warn('[Shutdown] Zaman aşımı — süreç zorla sonlandırılıyor.');
+        process.exit(0);
+    }, 8000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
