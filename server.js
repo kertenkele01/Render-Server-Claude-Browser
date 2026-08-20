@@ -342,14 +342,40 @@ const TOOLS = [
     },
     {
         name: "browser_click",
-        description: "Belirtilen element ID sayısı (örn. '1' veya '5'), Vimium etiketi, CSS seçici veya metin ('text=Uçuş Ara') ile eşleşen öğeye tıklar.",
+        description: "Bir öğeye tıklar. Tıklama gerçek bir işaretçi dizisi olarak gönderilir (pointerdown → mousedown → pointerup → mouseup → click), çünkü takvimler, açılır menüler ve yolcu seçiciler gibi özel bileşenler yalnızca 'click' olayını değil bu zinciri dinler. Yanıt, tıklamanın **etkisi olup olmadığını** söyler: 'page_changed', adres değiştiyse 'new_url', bir öneri listesi açıldıysa 'suggestions'. 'page_changed' false ise öğe bulunmuştur ama beklenen etkiyi yapmamıştır — aynı tıklamayı tekrarlamak yerine sayfayı yeniden okuyun. Element numaraları 'browser_get_markdown' geçişinde atanır; sayfa değiştiyse numaralar reddedilir ve yeniden okumanız istenir.",
         inputSchema: {
             type: "object",
             properties: {
-                selector: { type: "string", description: "Tıklanacak elementin ID sayısı (örn. '1'), Vimium etiketi, CSS seçicisi veya metni (örn. 'text=Arama Yap')" },
+                selector: { type: "string", description: "Markdown çıktısındaki element ID sayısı (ör. '12') veya bir CSS seçici. Sayı kullanmak daha güvenilirdir." },
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             },
             required: ["selector"]
+        }
+    },
+    {
+        name: "browser_press_key",
+        description: "Odaktaki (veya belirtilen) öğeye bir tuş gönderir: 'Enter', 'Escape', 'Tab', 'ArrowDown', 'ArrowUp', 'Backspace' gibi. Otomatik tamamlama akışlarının vazgeçilmezi: alana yazdıktan sonra açılan listeden seçmek için ArrowDown + Enter gönderin. 'Enter' bir form alanındayken ve sayfa olayı iptal etmediyse form ayrıca gönderilir ('form_submitted' alanına bakın). Yanıt, tıklamada olduğu gibi etkiyi de bildirir.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                key: { type: "string", description: "Tuş adı: Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Backspace, Delete, Home, End, PageUp, PageDown" },
+                selector: { type: "string", description: "(Opsiyonel) Tuşun gönderileceği öğe. Boş bırakılırsa sayfadaki odaklı öğeye gider — genelde az önce yazdığınız alan." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            },
+            required: ["key"]
+        }
+    },
+    {
+        name: "browser_wait_for",
+        description: "Bir öğe görünene veya bir metin sayfada belirene kadar bekler. Tıklamadan sonra sonuçların yüklenmesini beklemek için kullanın; sabit sürelerle tahmin yürütmekten iyidir. Süre dolarsa hata değil 'timeout' durumu döner — bu, beklediğiniz şeyin gelmediği bilgisidir; aynı beklemeyi tekrarlamak yerine sayfayı okuyun.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                selector: { type: "string", description: "Beklenecek CSS seçici veya element ID sayısı." },
+                text: { type: "string", description: "Sayfada görünmesi beklenen metin (büyük/küçük harf duyarsız)." },
+                timeout_ms: { type: "integer", minimum: 500, maximum: 20000, description: "En fazla bekleme süresi. Varsayılan 8000." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            }
         }
     },
     {
@@ -366,12 +392,13 @@ const TOOLS = [
     },
     {
         name: "browser_type",
-        description: "Belirtilen input/text/tarih alanına yazı girer. Selector olarak element ID sayısı (örn. '2'), Vimium ID sayısı veya CSS seçici kullanılabilir.",
+        description: "Bir alana metin yazar. Yazma gerçek bir klavye gibi davranır: değer, çatının (React/Vue) kendi izleyicisini fark edeceği şekilde yerel setter üzerinden yazılır ve tuş olayları gönderilir. Arama/otomatik tamamlama görünümlü alanlarda karakter karakter yazılır, çünkü bu alanlar öneri listesini tuş olaylarıyla açar — tek seferde değer atamak listeyi hiç açmaz ve form geçerli bir seçim almamış olur. Yanıtta bir öneri listesi belirdiyse 'suggestions' alanında gelir; oradan numarasıyla tıklayabilir veya ArrowDown + Enter gönderebilirsiniz. Şifre, doğrulama kodu ve ödeme alanları ayrı bir izne bağlıdır.",
         inputSchema: {
             type: "object",
             properties: {
-                selector: { type: "string", description: "Yazı girilecek elementin ID sayısı (örn. '2') veya CSS seçicisi" },
-                text: { type: "string", description: "Girilecek metin veya tarih (örn. 'İstanbul' veya '2026-08-15')" },
+                selector: { type: "string", description: "Markdown çıktısındaki element ID sayısı veya CSS seçici" },
+                text: { type: "string", description: "Yazılacak metin. Alan doluysa önce temizlenir." },
+                keystroke: { type: "boolean", description: "true verilirse alan arama görünümlü olmasa da karakter karakter yazılır. Öneri listesi açılmıyorsa bunu deneyin." },
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             },
             required: ["selector", "text"]
@@ -503,7 +530,7 @@ const TOOL_DOCUMENTATION = {
         },
         interaction: {
             name: "Etkileşim, Tıklama & Form Doldurma",
-            tools: ["browser_click", "browser_type", "browser_toggle_overlay", "browser_execute_js"]
+            tools: ["browser_click", "browser_type", "browser_press_key", "browser_wait_for", "browser_toggle_overlay", "browser_execute_js"]
         },
         content_extraction: {
             name: "İçerik Okuma",
@@ -594,32 +621,47 @@ const TOOL_DOCUMENTATION = {
         browser_click: {
             name: "browser_click",
             category: "interaction",
-            summary: "Belirtilen element ID numarasına ('1', '5'), CSS seçicisine veya metne ('text=Giriş Yap') tıklar.",
+            summary: "Bir öğeye gerçek işaretçi dizisiyle tıklar ve etkisini bildirir.",
             parameters: {
-                selector: "(Zorunlu, String) Element ID sayısı (örn. '3'), CSS seçici (örn. '#btn-submit', 'button.primary') veya metin (örn. 'text=Uçuş Ara')"
+                selector: "(Zorunlu, String) Element ID sayısı veya CSS seçici.",
+                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            example_call: { selector: "text=Arama Yap" },
-            best_practice: "Metinle tıklama ('text=...') veya element numarası ile tıklama ('1') genellikle CSS class isimlerinden çok daha dayanıklıdır."
+            best_practice: "Yanıttaki 'page_changed' alanına bakın. False ise öğe bulunmuş ama bir şey olmamıştır — aynı tıklamayı tekrarlamak yardımcı olmaz; sayfayı yeniden okuyup başka bir öğe deneyin. 'suggestions' geldiyse bir liste açılmıştır, listeden seçin. 'new_url' geldiyse element numaraları geçersizdir, devam etmeden önce sayfayı yeniden okuyun."
+        },
+        browser_press_key: {
+            name: "browser_press_key",
+            category: "interaction",
+            summary: "Enter, Escape, Tab veya ok tuşlarını gönderir.",
+            parameters: {
+                key: "(Zorunlu, String) Enter, Escape, Tab, ArrowDown, ArrowUp, Backspace …",
+                selector: "(Opsiyonel, String) Hedef öğe; boşsa odaktaki öğeye gider.",
+                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
+            },
+            best_practice: "Otomatik tamamlama akışının ikinci yarısı budur: 'browser_type' ile yazın, yanıtta 'suggestions' gelirse ArrowDown ve Enter gönderin. Arama kutusunda Enter formu da gönderir; 'form_submitted' alanı bunu doğrular."
+        },
+        browser_wait_for: {
+            name: "browser_wait_for",
+            category: "interaction",
+            summary: "Bir öğe veya metin görünene kadar bekler.",
+            parameters: {
+                selector: "(Opsiyonel, String) Beklenecek seçici veya element numarası.",
+                text: "(Opsiyonel, String) Beklenecek metin.",
+                timeout_ms: "(Opsiyonel, Integer) 500–20000 arası, varsayılan 8000.",
+                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
+            },
+            best_practice: "Arama sonuçları, uçuş listeleri ve giriş sonrası yönlendirmeler için kullanın. 'timeout' dönerse beklediğiniz şey gelmemiştir; tekrar beklemek yerine sayfayı okuyup gerçekte ne olduğunu görün."
         },
         browser_type: {
             name: "browser_type",
             category: "interaction",
-            summary: "Input veya metin alanına yazı yazar ve gerçek klavye/input olaylarını tetikler.",
+            summary: "Bir alana klavye gibi yazar; arama alanlarında karakter karakter gider.",
             parameters: {
-                selector: "(Zorunlu, String) Element ID sayısı (örn. '2'), CSS seçici (örn. 'input[name=\"q\"]') veya 'input'",
-                text: "(Zorunlu, String) Girilecek metin (örn. 'Ali Veli' veya '2026-08-15')"
+                selector: "(Zorunlu, String) Element ID sayısı veya CSS seçici.",
+                text: "(Zorunlu, String) Yazılacak metin.",
+                keystroke: "(Opsiyonel, Boolean) Karakter karakter yazmayı zorlar.",
+                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            example_call: { selector: "input[type='search']", text: "Antalya Otelleri" },
-            best_practice: "Yazı yazdıktan sonra formu göndermek için ilgili butona 'browser_click' yapın veya 'browser_execute_js' ile form.submit() tetikleyin. Kişisel bilgi alanları (e-posta, telefon, adres, kimlik, doğum tarihi) telefonda kullanıcı onayı ister. Şifre, doğrulama kodu ve ödeme alanları için 'sensitive_fields' izni gerekir; izniniz yoksa kullanıcıdan telefondan açmasını isteyin, izin açıkken de her doldurma için ayrıca onay çıkabilir."
-        },
-        browser_scroll: {
-            name: "browser_scroll",
-            category: "navigation",
-            summary: "Sayfayı aşağı ('down') veya yukarı ('up') kaydırır.",
-            parameters: {
-                direction: "(Opsiyonel, String) 'down' veya 'up' (Varsayılan: 'down')"
-            },
-            best_practice: "Sonsuz kaydırmalı sayfalarda (Twitter, feed'ler) veya ekranın altında kalan butonları görünür yapmak için kullanın."
+            best_practice: "Uçuş, otel ve şehir alanlarında metnin görünmesi yetmez — form geçerli bir seçim bekler. Yazdıktan sonra yanıttaki 'suggestions' listesine bakın ve mutlaka birini seçin; liste boşsa 'keystroke' true ile tekrar deneyin, sonra 'browser_wait_for' ile listenin gelmesini bekleyin."
         },
         browser_execute_js: {
             name: "browser_execute_js",
@@ -698,6 +740,18 @@ const TOOL_DOCUMENTATION = {
         }
     },
     playbooks: [
+        {
+            title: "Form ve rezervasyon sitelerinde çalışma",
+            steps: [
+                "1. Sayfaya gidin; yanıttaki 'headings' ile doğru yerde olduğunuzu doğrulayın.",
+                "2. 'browser_get_markdown' çağırın — element numaraları bu geçişte atanır, öncesinde numarayla tıklayamazsınız.",
+                "3. Alanı 'browser_type' ile doldurun. Şehir/havalimanı gibi alanlarda yanıttaki 'suggestions' listesini bekleyin.",
+                "4. Listeden seçin: numarasıyla 'browser_click' veya 'browser_press_key' ile ArrowDown + Enter.",
+                "5. Tarih ve yolcu seçicileri özel bileşendir; 'browser_click' sonrası 'page_changed' false ise takvim açılmamıştır, sayfayı yeniden okuyup gerçek düğmeyi bulun.",
+                "6. Aramayı başlattıktan sonra 'browser_wait_for' ile sonuçların gelmesini bekleyin.",
+                "7. Her adımdan sonra 'page_changed' alanına bakın; false ise ilerlememişsinizdir ve aynı adımı tekrarlamak yardımcı olmaz."
+            ]
+        },
         {
             title: "İş Akışı 1: Web Araması ve Bilgi Toplama (Research & Extract)",
             steps: [
@@ -1361,6 +1415,8 @@ app.post('/message', async (req, res) => {
             case "browser_scroll": actionType = "scroll"; break;
             case "browser_click": actionType = "click"; break;
             case "browser_type": actionType = "type"; break;
+            case "browser_press_key": actionType = "press_key"; break;
+            case "browser_wait_for": actionType = "wait_for"; break;
             case "browser_toggle_overlay": actionType = "toggle_overlay"; break;
             case "browser_execute_js": actionType = "execute_js"; break;
             case "browser_new_tab": actionType = "new_tab"; break;
@@ -1563,6 +1619,12 @@ const fallbackRoutes = [
     
     { path: '/mcp/tools/browser_type', type: 'type' },
     { path: '/tools/browser_type', type: 'type' },
+
+    { path: '/mcp/tools/browser_press_key', type: 'press_key' },
+    { path: '/tools/browser_press_key', type: 'press_key' },
+
+    { path: '/mcp/tools/browser_wait_for', type: 'wait_for' },
+    { path: '/tools/browser_wait_for', type: 'wait_for' },
 
     { path: '/mcp/tools/browser_toggle_overlay', type: 'toggle_overlay' },
     { path: '/tools/browser_toggle_overlay', type: 'toggle_overlay' },
