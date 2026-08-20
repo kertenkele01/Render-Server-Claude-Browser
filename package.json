@@ -4,10 +4,12 @@
   "description": "MCP bridge relay connecting AI clients to the AI Browser Android app",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "express": "^4.21.2",
+    "pg": "^8.23.0",
     "ws": "^8.18.0"
   },
   "engines": {

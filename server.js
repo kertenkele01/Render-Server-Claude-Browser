@@ -1,9 +1,15 @@
 const express = require('express');
 const { createServer } = require('http');
 const { WebSocketServer } = require('ws');
-const { randomUUID, createHash, timingSafeEqual } = require('crypto');
+const { randomUUID, createHash, timingSafeEqual, randomInt } = require('crypto');
+
 const fs = require('fs');
 const path = require('path');
+
+const { openStore } = require('./lib/store');
+const accounts = require('./lib/auth');
+const limits = require('./lib/limits');
+const panel = require('./lib/panel');
 
 const app = express();
 app.disable('x-powered-by');
@@ -27,21 +33,15 @@ try {
     console.warn('[Config] Could not read .env:', e.message);
 }
 
-// A short admin token is worse than none: it looks like a lock while being
-// guessable, and /api/status has no attempt limit behind it. Anything under 24
-// characters is treated as unset, loudly, rather than quietly accepted.
-const ADMIN_TOKEN_MIN_LENGTH = 24;
-const RAW_ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
-const ADMIN_TOKEN_TOO_SHORT = RAW_ADMIN_TOKEN.length > 0 && RAW_ADMIN_TOKEN.length < ADMIN_TOKEN_MIN_LENGTH;
-const ADMIN_TOKEN = ADMIN_TOKEN_TOO_SHORT ? '' : RAW_ADMIN_TOKEN;
-
-// ADMIN_PUBLIC opens the operator console to anyone who knows the URL. It is a
-// deliberate opt-in, never a default: the console is read-only and exposes no
-// secret, but it does list paired clients and a live feed of the hosts this
-// phone is visiting. That is browsing history, and a Render URL is guessable.
-// Set it only on a deployment you are comfortable being public.
-const ADMIN_PUBLIC = /^(1|true|yes|on)$/i.test((process.env.ADMIN_PUBLIC || '').trim());
-const STATE_FILE = process.env.BRIDGE_STATE_FILE || path.join(__dirname, '.bridge-state.json');
+// ADMIN_TOKEN and ADMIN_PUBLIC are gone. They were a stand-in for "there is
+// one operator and it is me": a single shared token that unlocked a console
+// listing every device on the relay and the hosts each one was visiting. With
+// accounts, that is no longer a convenience, it is a way to hand one tenant
+// everybody else's browsing. The panel is behind a real session now.
+//
+// ALLOW_REGISTRATION closes signups on a private deployment. Open by default so
+// a fresh install is usable; the first account is the operator's own.
+const ALLOW_REGISTRATION = !/^(0|false|no|off)$/i.test((process.env.ALLOW_REGISTRATION || 'true').trim());
 // MCP clients are not browsers, so no cross-origin access is required. Set
 // ALLOWED_ORIGINS only if you deliberately front the bridge with a web app.
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
@@ -70,13 +70,21 @@ const pendingRequests = new Map(); // messageId -> { resolve, reject, timeout }
 
 // ----------------------------------------------------
 // IDENTITY REGISTRY
+//
 // The device is the authority: it mints every clientId/clientSecret and tells
 // us only the hash. We keep the hash so we can reject bad credentials early,
 // and the clientId -> deviceId binding so a command can never be routed to
 // somebody else's phone.
+//
+// These two Maps are a *read cache* over `lib/store.js`, not the truth. Every
+// MCP command calls `authenticate()`, and making that wait on a query would put
+// a database round trip in front of every page read. Writes go to the store and
+// refresh the cache; the cache is rebuilt at boot.
 // ----------------------------------------------------
-const devices = new Map(); // deviceId -> { secretHash }
-const clients = new Map(); // clientId -> { deviceId, secretHash, name }
+const devices = new Map(); // deviceId -> { id, accountId, secretHash, name, ... }
+const clients = new Map(); // clientId -> { id, deviceId, accountId, secretHash, name }
+
+let store = null;
 
 function sha256(value) {
     return createHash('sha256').update(String(value)).digest('hex');
@@ -89,68 +97,148 @@ function safeEquals(a, b) {
     return timingSafeEqual(bufA, bufB);
 }
 
-function loadState() {
-    try {
-        if (!fs.existsSync(STATE_FILE)) return;
-        const raw = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-        Object.entries(raw.devices || {}).forEach(([id, v]) => devices.set(id, v));
-        Object.entries(raw.clients || {}).forEach(([id, v]) => clients.set(id, v));
-        console.log(`[State] Restored ${devices.size} device(s), ${clients.size} client(s).`);
-    } catch (e) {
-        console.error('[State] Could not read state file:', e.message);
+// Accounts are read on the hot path only to check `status` and `plan`, both of
+// which change rarely, so the same read-through treatment applies.
+const accountCache = new Map(); // accountId -> account
+
+/** Rebuilds the hot-path cache from the store. */
+async function refreshRegistryCache() {
+    const [deviceRows, clientRows] = await Promise.all([
+        store.listAllDevices(),
+        store.listAllClients()
+    ]);
+    devices.clear();
+    clientRows.forEach((c) => clients.set(c.id, c));
+    deviceRows.forEach((d) => devices.set(d.id, d));
+    for (const id of [...clients.keys()]) {
+        if (!clientRows.some((c) => c.id === id)) clients.delete(id);
     }
-}
-
-let saveTimer = null;
-
-/** The actual write. Synchronous so shutdown can call it and be sure. */
-function writeStateNow() {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-    try {
-        fs.writeFileSync(STATE_FILE, JSON.stringify({
-            devices: Object.fromEntries(devices),
-            clients: Object.fromEntries(clients)
-        }), 'utf8');
-    } catch (e) {
-        console.error('[State] Could not persist state file:', e.message);
+    const accountIds = new Set();
+    deviceRows.forEach((d) => d.accountId && accountIds.add(d.accountId));
+    accountCache.clear();
+    for (const id of accountIds) {
+        const account = await store.getAccountById(id);
+        if (account) accountCache.set(id, account);
     }
+
+    console.log(`[Registry] ${devices.size} cihaz, ${clients.size} istemci, ${accountCache.size} hesap önbelleğe alındı.`);
 }
 
-/**
- * Coalesces the writes a burst of registrations would cause.
- *
- * The debounce is why shutdown has to flush explicitly: a pairing announced in
- * the last quarter second before a redeploy would otherwise be lost with the
- * timer.
- */
-function saveState() {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(writeStateNow, 250);
+// ----------------------------------------------------
+// CLAIM CODES
+// How a phone gets attached to an account. The phone asks over its existing
+// socket, shows the code, and the owner types it into the panel. Short-lived
+// and single-use: it is a bearer token for "this device is mine", so it should
+// be worth stealing for as little time as possible.
+// ----------------------------------------------------
+const CLAIM_CODE_TTL_MS = 10 * 60 * 1000;
+// No 0/O/1/I/L: this is read off one screen and typed into another.
+const CLAIM_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+function newClaimCode() {
+    let out = '';
+    for (let i = 0; i < 8; i++) out += CLAIM_ALPHABET[randomInt(CLAIM_ALPHABET.length)];
+    return out;
 }
-loadState();
+
+function normaliseClaimCode(value) {
+    const cleaned = String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return cleaned.length >= 6 && cleaned.length <= 16 ? cleaned : '';
+}
+
+async function issueClaimCode(deviceId) {
+    const claim = {
+        code: newClaimCode(),
+        deviceId,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + CLAIM_CODE_TTL_MS
+    };
+    await store.createClaimCode(claim);
+    return claim;
+}
 
 // ----------------------------------------------------
 // LOGGING — metadata only.
 // Never record tokens, page content, or full URLs here: this bridge carries
 // authenticated browsing sessions and the log is the easiest thing to leak.
 // ----------------------------------------------------
-const logs = [];
+/**
+ * The audit trail.
+ *
+ * Same rule as before, and it has not softened: tool name, outcome, duration
+ * and at most a **host**. Never a token, never page content, never a full URL.
+ * What changed is where it goes — the in-memory ring was fine when there was
+ * one operator reading it live, but an account expects to open the panel
+ * tomorrow and still see what happened today.
+ *
+ * Writes are queued and flushed off the request path. An audit row is not worth
+ * adding latency to a page read, and it is not worth failing a command over: if
+ * the store is unhappy the event is dropped with a warning rather than
+ * propagated to the caller.
+ */
+const auditQueue = [];
+const AUDIT_QUEUE_MAX = 1000;
+let auditFlushing = false;
+
 function hostOf(url) {
     try { return new URL(String(url)).host; } catch (e) { return ''; }
 }
-function addLog(clientId, clientName, deviceId, action, status, detail) {
-    logs.unshift({
-        id: randomUUID().substring(0, 8),
-        timestamp: new Date().toLocaleTimeString('tr-TR'),
-        clientId: clientId ? String(clientId).substring(0, 12) : 'N/A',
-        clientName: clientName || 'N/A',
-        deviceId: deviceId || 'N/A',
-        action,
-        status, // 'success', 'error', 'pending', 'info'
-        detail: detail || ''
-    });
-    if (logs.length > 100) logs.pop();
+
+/** Which account an event belongs to, resolved from the hot cache. */
+function accountIdFor(clientId, deviceId) {
+    if (clientId) {
+        const c = clients.get(clientId);
+        if (c && c.accountId) return c.accountId;
+        if (c && c.deviceId) deviceId = deviceId || c.deviceId;
+    }
+    if (deviceId) {
+        const d = devices.get(deviceId);
+        if (d && d.accountId) return d.accountId;
+    }
+    return null;
+}
+
+function addLog(clientId, clientName, deviceId, action, status, detail, host = null) {
+    const event = {
+        accountId: accountIdFor(clientId, deviceId),
+        deviceId: deviceId ? String(deviceId).substring(0, 64) : null,
+        clientId: clientId ? String(clientId).substring(0, 64) : null,
+        action: String(action || '').substring(0, 80),
+        status: String(status || 'info').substring(0, 16),
+        detail: detail ? String(detail).substring(0, 240) : null,
+        host: host ? String(host).substring(0, 120) : null,
+        createdAt: Date.now()
+    };
+
+    // An event with no account has nobody to show it to. It is still worth a
+    // console line — this is how an unclaimed device announces itself.
+    if (!event.accountId) {
+        console.log(`[Audit] (sahipsiz) ${event.action} · ${event.status} · ${event.deviceId || '-'}`);
+        return;
+    }
+
+    if (auditQueue.length >= AUDIT_QUEUE_MAX) {
+        auditQueue.shift();
+    }
+    auditQueue.push(event);
+    flushAudit();
+}
+
+async function flushAudit() {
+    if (auditFlushing || !store || auditQueue.length === 0) return;
+    auditFlushing = true;
+    try {
+        while (auditQueue.length) {
+            const event = auditQueue.shift();
+            try {
+                await store.appendAudit(event);
+            } catch (e) {
+                console.warn('[Audit] Kayıt yazılamadı:', e.message);
+            }
+        }
+    } finally {
+        auditFlushing = false;
+    }
 }
 
 // Standard MCP Tools schema
@@ -199,7 +287,7 @@ const TOOLS = [
     },
     {
         name: "browser_screenshot",
-        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. Android yalnızca ekranda olan bir WebView'ı çizdiği için: sekme ekrandaysa doğrudan alınır; arka plandaki bir sekme için uygulama telefonda açıksa cihaz o sekmeyi bir anlığına ekrana alır, görüntüyü çeker ve ekranı eski haline döndürür (yanıtta 'captured_by_showing_tab' true olur). Uygulama ön planda değilse 'blank_capture' hatası döner — sayfa yüklüdür, yalnızca çizilmemiştir; içeriği 'browser_get_local_markdown' ile okuyun. Video, WebGL ve bazı canvas içerikleri ekrandayken bile boş çıkabilir.",
+        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. Android yalnızca ekranda olan bir WebView'ı çizdiği için: sekme ekrandaysa doğrudan alınır; arka plandaki bir sekme için uygulama telefonda açıksa cihaz o sekmeyi bir anlığına ekrana alır, görüntüyü çeker ve ekranı eski haline döndürür (yanıtta 'captured_by_showing_tab' true olur). Uygulama ön planda değilse 'blank_capture' hatası döner — sayfa yüklüdür, yalnızca çizilmemiştir; içeriği 'browser_get_markdown' ile okuyun. Video, WebGL ve bazı canvas içerikleri ekrandayken bile boş çıkabilir.",
         inputSchema: {
             type: "object",
             properties: {
@@ -220,21 +308,12 @@ const TOOLS = [
         }
     },
     {
-        name: "browser_get_local_markdown",
-        description: "Şu an açık olan sayfanın yerel dahili dönüştürücüsü (Built-in Turndown JS Engine) ile dönüştürülmüş Markdown içeriğini (`markdown`) alır. Crawl4AI sunucusuna istek atmadan doğrudan yerel ve hızlı dönüşüm yapar.",
-        inputSchema: {
-            type: "object",
-            properties: {
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
-            }
-        }
-    },
-    {
         name: "browser_get_markdown",
-        description: "Şu an açık olan sayfanın resmi Python Crawl4AI motoru ile işlenmiş fit_markdown/Markdown içeriğini (`markdown`), kullanılan motor bilgisini (`engine_used`) ve dönüştürme durumunu (`markdown_status`) alır.",
+        description: "Şu an açık olan sayfanın Markdown içeriğini (`markdown`) alır. Dönüşüm cihazda yapılır: çıktı düz bir metin dökümü değil, tıklanabilir öğelerin numaralandırıldığı bir etkileşim haritasıdır — buradaki ID sayılarını doğrudan `browser_click` ve `browser_type` ile kullanabilirsiniz. Şifre, kart ve OTP alanlarının değerleri asla okunmaz. Telefonda token tasarrufu açıksa yanıt 80.000 karakterlik parçalara ayrılır; `has_more` true olduğunda `next_offset` değeriyle devam edin.",
         inputSchema: {
             type: "object",
             properties: {
+                offset: { type: "integer", minimum: 0, description: "Token tasarrufu açıkken okunacak Markdown parçasının başlangıç karakteri. İlk çağrıda 0 veya boş bırakın; devam için önceki yanıttaki next_offset değerini verin." },
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             }
         }
@@ -355,7 +434,7 @@ const TOOLS = [
     },
     {
         name: "browser_list_sessions",
-        description: "Tüm aktif oturumları listeler. Eğer kullanıcı ayarlarında oturumlar arası erişim kapalı ise yalnızca mevcut AI oturumu döner.",
+        description: "Kendi oturumunuzu listeler. Oturum izolasyonu mimari olarak zorunludur: başka bir istemcinin veya kullanıcının oturumu hiçbir ayarla görünür hale gelmez.",
         inputSchema: {
             type: "object",
             properties: {
@@ -386,7 +465,7 @@ const TOOL_DOCUMENTATION = {
         capabilities: [
             "Gerçek Android WebView ortamında tam JavaScript, DOM, CSS ve Canvas çalıştırma",
             "Multi-Profile Cookie İzolasyonu: Her AI istemcisine özel bağımsız çerez ve depolama alanı",
-            "Crawl4AI & Dahili Turndown Markdown Motorları ile anında temiz içerik çıkarma",
+            "Cihaz üstü Markdown motoru ile anında temiz içerik çıkarma — sayfa hiçbir dış servise gönderilmez",
             "Vimium-Style Numaralandırılmış Görsel Overlay ile elementleri ID sayılarıyla seçme/tıklama",
             "Çoklu Sekme (Multi-Tab) yönetimi ve DOM kaynağı alma"
         ],
@@ -407,7 +486,7 @@ const TOOL_DOCUMENTATION = {
         },
         content_extraction: {
             name: "İçerik Okuma",
-            tools: ["browser_get_markdown", "browser_get_local_markdown", "browser_get_html", "browser_screenshot"]
+            tools: ["browser_get_markdown", "browser_get_html", "browser_screenshot"]
         },
         tabs_and_sessions: {
             name: "Sekme & Oturum Bilgisi",
@@ -438,7 +517,7 @@ const TOOL_DOCUMENTATION = {
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
             example_call: { url: "https://www.google.com" },
-            best_practice: "Gezinti sonrası içerik okumak için 'browser_get_local_markdown' veya 'browser_get_markdown' aracını çağırın."
+            best_practice: "Gezinti sonrası içerik okumak için 'browser_get_markdown' aracını çağırın."
         },
         browser_search: {
             name: "browser_search",
@@ -449,25 +528,17 @@ const TOOL_DOCUMENTATION = {
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
             example_call: { query: "İstanbul hava durumu" },
-            best_practice: "Google aramasından sonra arama sonuçlarındaki linkleri ve başlıkları okumak için 'browser_get_local_markdown' çağırın."
-        },
-        browser_get_local_markdown: {
-            name: "browser_get_local_markdown",
-            category: "content_extraction",
-            summary: "Açık olan sayfanın yerel dahili Turndown motoruyla anında dönüştürülmüş Markdown içeriğini döner.",
-            parameters: {
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "En hızlı, en hafif ve sıfır gecikmeli içerik okuma aracıdır. Makale okumak, arama sonuçlarını taramak veya sayfa yapısını anlamak için ilk tercihiniz olmalıdır."
+            best_practice: "Google aramasından sonra arama sonuçlarındaki linkleri ve başlıkları okumak için 'browser_get_markdown' çağırın."
         },
         browser_get_markdown: {
             name: "browser_get_markdown",
             category: "content_extraction",
-            summary: "Sayfanın resmi Crawl4AI Python motoru ile işlenmiş fit_markdown içeriğini döner.",
+            summary: "Açık olan sayfanın Markdown içeriğini döner. Dönüşüm cihazda yapılır; çıktı tıklanabilir öğelerin numaralandırıldığı bir etkileşim haritasıdır.",
             parameters: {
+                offset: "(Opsiyonel, Integer) Token tasarrufu açıkken ilk çağrıda 0; devam çağrısında önceki next_offset değeri.",
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            best_practice: "Crawl4AI sunucusu aktif olduğunda gereksiz gürültüden arındırılmış temiz metin çıktısı sağlar."
+            best_practice: "İçerik okumanın tek ve varsayılan yoludur: hızlı, cihazda çalışır, sayfayı hiçbir dış servise göndermez. Çıktının başındaki element ID sayılarını doğrudan 'browser_click' ve 'browser_type' ile kullanın. has_more true ise aynı aracı next_offset ile çağırın; sayfayı baştan okumayın. Ham kaynak gerekiyorsa 'browser_get_html' ayrı bir araçtır."
         },
         browser_get_html: {
             name: "browser_get_html",
@@ -487,7 +558,7 @@ const TOOL_DOCUMENTATION = {
                 tabId: "(Opsiyonel, String) Hedef sekme; verilmezse oturumun aktif sekmesi.",
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            best_practice: "Sayfanın yapısını anlamak için önce 'browser_get_local_markdown' kullanın — metin hem daha ucuz hem daha kesindir. Ekran görüntüsünü, yerleşimi görmeniz gereken durumlarda (bir öğe gerçekten görünüyor mu, bir grafik neye benziyor, tıklama doğru yere gitti mi) tercih edin. Yanıttaki 'full_page' alanı tam sayfa mı yoksa yalnızca görünen alan mı alındığını söyler; 'browser_toggle_overlay' ile birlikte kullanırsanız tıklanabilir öğelerin numaraları da görüntüde görünür.",
+            best_practice: "Sayfanın yapısını anlamak için önce 'browser_get_markdown' kullanın — metin hem daha ucuz hem daha kesindir. Ekran görüntüsünü, yerleşimi görmeniz gereken durumlarda (bir öğe gerçekten görünüyor mu, bir grafik neye benziyor, tıklama doğru yere gitti mi) tercih edin. Yanıttaki 'full_page' alanı tam sayfa mı yoksa yalnızca görünen alan mı alındığını söyler; 'browser_toggle_overlay' ile birlikte kullanırsanız tıklanabilir öğelerin numaraları da görüntüde görünür.",
             limitations: "Uygulama ön planda değilken hiçbir sekme çizilmez ve 'blank_capture' döner; bu durumda içeriği metin olarak okuyun. Ekrana alma birkaç yüz milisaniye sürer ve kullanıcının ekranı o an kısaca değişir, bu yüzden döngü içinde çağırmayın. Aynı anda yalnızca bir ekrana alma yapılabilir. Tam sayfa yakalama yalnızca ekran dışı çizimde mümkündür; ekrana alınarak çekilen görüntülerde yalnızca görünen alan gelir. Görüntü 720 piksel genişliğe ölçeklenir ve JPEG olarak sıkıştırılır. Video, WebGL ve GPU ile birleştirilen bazı canvas içerikleri boş çıkabilir."
         },
         browser_toggle_overlay: {
@@ -497,7 +568,7 @@ const TOOL_DOCUMENTATION = {
             parameters: {
                 enabled: "(Zorunlu, Boolean) true (etiketleri aç) veya false (kapat)"
             },
-            best_practice: "Form doldururken veya karmaşık bir sayfada tıklama yaparken önce overlay'i açın, ardından 'browser_get_local_markdown' çıktısındaki element ID sayılarını tespit edip doğrudan ID numarasıyla ('1', '2' vb.) tıklayın."
+            best_practice: "Form doldururken veya karmaşık bir sayfada tıklama yaparken önce overlay'i açın, ardından 'browser_get_markdown' çıktısındaki element ID sayılarını tespit edip doğrudan ID numarasıyla ('1', '2' vb.) tıklayın."
         },
         browser_click: {
             name: "browser_click",
@@ -579,9 +650,9 @@ const TOOL_DOCUMENTATION = {
         browser_list_sessions: {
             name: "browser_list_sessions",
             category: "tabs_and_sessions",
-            summary: "Yalnızca kendi oturumunuzu döner. Oturumlar arası görünürlük cihaz tarafından kapatılmıştır.",
+            summary: "Yalnızca kendi oturumunuzu döner. Oturumlar arası görünürlük diye bir seçenek yoktur.",
             parameters: {},
-            best_practice: "Profil seçimi cihazın kararıdır; başka bir oturuma geçiş yapılamaz."
+            best_practice: "Aynı oturumu paylaşmanız gerekiyorsa cihaz sahibi aynı istemci anahtarını birden fazla MCP istemcisine tanımlar; oturum değiştirme diye bir işlem yoktur."
         },
         browser_clear_session_data: {
             name: "browser_clear_session_data",
@@ -600,9 +671,9 @@ const TOOL_DOCUMENTATION = {
             title: "İş Akışı 1: Web Araması ve Bilgi Toplama (Research & Extract)",
             steps: [
                 "1. 'browser_search(query: \"...\")' çağırarak arama yapın.",
-                "2. 'browser_get_local_markdown()' çağırarak arama sonuçlarını ve linkleri okuyun.",
+                "2. 'browser_get_markdown()' çağırarak arama sonuçlarını ve linkleri okuyun.",
                 "3. İlgili bir sonuca gitmek için 'browser_navigate(url: \"...\")' veya 'browser_click(selector: \"text=...\")' çağırın.",
-                "4. Hedef sayfadaki tam içeriği 'browser_get_local_markdown()' ile çekip kullanıcıya özetleyin."
+                "4. Hedef sayfadaki tam içeriği 'browser_get_markdown()' ile çekip kullanıcıya özetleyin."
             ]
         },
         {
@@ -611,14 +682,14 @@ const TOOL_DOCUMENTATION = {
                 "1. 'browser_navigate(url: \"...\")' ile sayfayı açın.",
                 "2. 'browser_type(selector: \"input[name='username']\", text: \"...\")' ile inputları doldurun.",
                 "3. Butona tıklamak için 'browser_click(selector: \"text=Giriş Yap\")' veya CSS seçici kullanın.",
-                "4. İşlemin sonucunu doğrulamak için 'browser_get_local_markdown()' çağırın."
+                "4. İşlemin sonucunu doğrulamak için 'browser_get_markdown()' çağırın."
             ]
         },
         {
             title: "İş Akışı 3: Numaralandırılmış Element ile Hassas Tıklama",
             steps: [
                 "1. 'browser_toggle_overlay(enabled: true)' ile interaktif elementlerin üzerine numaralandırma etiketlerini yerleştirin.",
-                "2. 'browser_get_local_markdown()' çağırarak çıktının başındaki 'İnteraktif Elementler Tablosu'ndan ID numaralarını okuyun.",
+                "2. 'browser_get_markdown()' çağırarak çıktının başındaki 'İnteraktif Elementler Tablosu'ndan ID numaralarını okuyun.",
                 "3. Hedef elementin numarasını (örn. '5') 'browser_click(selector: \"5\")' ile doğrudan tıklayın.",
                 "4. İşi bitirince 'browser_toggle_overlay(enabled: false)' ile overlay'i kapatın."
             ]
@@ -685,7 +756,11 @@ function extractCredential(req) {
     if (header) {
         raw = header.toLowerCase().startsWith('bearer ') ? header.substring(7).trim() : header.trim();
     }
-    if (!raw) raw = req.query.token || req.headers['x-mcp-token'] || '';
+    // Deliberately not `req.query.token`. A secret in a query string ends up in
+    // the platform's access logs, in every proxy between here and the client,
+    // and in browser history — and the relay cannot un-log any of them. The
+    // header is the only way in.
+    if (!raw) raw = req.headers['x-mcp-token'] || '';
     return parseCredential(raw);
 }
 
@@ -696,17 +771,95 @@ function authenticate(req) {
     const record = clients.get(cred.clientId);
     if (!record) return { ok: false, reason: 'unknown' };
     if (!safeEquals(sha256(cred.secret), record.secretHash)) return { ok: false, reason: 'bad_secret' };
-    return { ok: true, clientId: cred.clientId, secret: cred.secret, record };
+    const account = record.accountId ? accountCache.get(record.accountId) || null : null;
+    return { ok: true, clientId: cred.clientId, secret: cred.secret, record, account };
 }
 
+/**
+ * Guards an MCP entry point.
+ *
+ * Three things happen here that did not before:
+ *
+ * 1. A wrong credential is counted per IP. Without that, a valid `clientId` is
+ *    findable by trying secrets at line speed, and nothing anywhere would say
+ *    so.
+ * 2. A suspended account's keys stop working. Suspension that only takes effect
+ *    at the next pairing is not suspension.
+ * 3. The account is attached to the result, so everything downstream — quota,
+ *    audit scoping, the panel — has it without another lookup.
+ */
 function requireAuth(req, res) {
+    const ip = limits.clientIp(req);
     const auth = authenticate(req);
-    if (auth.ok) return auth;
-    res.status(401).json({
-        error: 'unauthorized',
-        message: "Geçerli bir istemci kimliği gerekli. Android uygulamasında Ayarlar → MCP → 'AI istemcisi ekle' ile bir eşleştirme kodu alın ve verilen 'Authorization: Bearer <clientId>.<secret>' başlığını MCP yapılandırmanıza ekleyin."
-    });
-    return null;
+
+    if (!auth.ok) {
+        const gate = limits.hit('credential', ip);
+        if (!gate.allowed) {
+            res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+            res.status(429).json({
+                error: 'too_many_attempts',
+                message: `Çok fazla başarısız kimlik denemesi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`
+            });
+            return null;
+        }
+        res.status(401).json({
+            error: 'unauthorized',
+            message: "Geçerli bir istemci kimliği gerekli. Android uygulamasında Ayarlar → MCP → 'AI istemcisi ekle' ile bir anahtar üretin ve verilen 'Authorization: Bearer <clientId>.<secret>' başlığını MCP yapılandırmanıza ekleyin."
+        });
+        return null;
+    }
+
+    if (auth.account && auth.account.status !== 'active') {
+        res.status(403).json({
+            error: 'account_suspended',
+            message: 'Bu istemcinin bağlı olduğu hesap askıya alınmış. Panelden durumu kontrol edin.'
+        });
+        return null;
+    }
+
+    limits.reset('credential', ip);
+    return auth;
+}
+
+/**
+ * Daily command quota, counted per account.
+ *
+ * Deliberately generous on the free plan: the work runs on the user's own
+ * phone, so a command costs the relay a few hundred bytes of routing. This is
+ * an abuse ceiling, not a packaging lever — the things worth charging for are
+ * the ones that actually cost something.
+ *
+ * An unclaimed device has no account and therefore no counter. That is the
+ * migration path, not a loophole: routing still needs a client secret only the
+ * real phone could have minted.
+ *
+ * `refuse` is passed in rather than a response object because the two callers
+ * speak different protocols — one answers in JSON-RPC over SSE, the other in
+ * plain HTTP — and the quota rule itself should not have to know which.
+ */
+async function enforceQuota(auth, refuse) {
+    const accountId = auth.record && auth.record.accountId;
+    if (!accountId) return true;
+
+    const plan = limits.planFor(auth.account);
+    const window = limits.currentUsageWindow();
+
+    let usage;
+    try {
+        usage = await store.addUsage(accountId, window, 1, 0);
+    } catch (e) {
+        // A counter that cannot be written must not become a way to block
+        // someone's browser. Log it and let the command through.
+        console.warn('[Quota] Sayaç yazılamadı:', e.message);
+        return true;
+    }
+
+    if (usage.commandCount > plan.commandsPerDay) {
+        const resetsIn = Math.ceil((window + 86400000 - Date.now()) / 60000);
+        refuse(`quota_exceeded: günlük komut kotanız doldu (${plan.commandsPerDay}). Kota ${resetsIn} dakika içinde sıfırlanır. Bu geçici bir sınırdır ve tekrar denemek işe yaramaz — kullanıcıya durumu bildirin.`);
+        return false;
+    }
+    return true;
 }
 
 // Route a command to the one device this client is bound to. There is no
@@ -786,7 +939,14 @@ wss.on('connection', (ws) => {
         try { ws.close(4401, reason); } catch (e) {}
     };
 
-    ws.on('message', (message) => {
+    // Registration and client bookkeeping write through to the store, so this
+    // handler is async. `ws` does not wait for the returned promise, which means
+    // a second frame can start while the first is still awaiting. That is safe
+    // here only because `authenticated` is the gate: everything except
+    // `register` returns early until it is set, so an early frame is dropped
+    // rather than processed against a half-built identity. Keep that property
+    // if you add a message type.
+    ws.on('message', async (message) => {
         let payload;
         try {
             payload = JSON.parse(message.toString());
@@ -809,10 +969,33 @@ wss.on('connection', (ws) => {
                     addLog(null, 'Bilinmeyen', id, 'Reddedilen Kayıt', 'error', 'Cihaz sırrı eşleşmedi.');
                     return fail('Cihaz sırrı eşleşmiyor');
                 }
+                await store.upsertDevice({
+                    id,
+                    secretHash: known.secretHash,
+                    name: String(payload.deviceName || known.name || id).substring(0, 60)
+                });
             } else {
-                // Trust on first use: the first device to claim this id owns it.
-                devices.set(id, { secretHash: sha256(secret) });
-                console.log(`[WS] New device enrolled: ${id}`);
+                // Trust on first use used to be the whole enrolment story, and it
+                // was only survivable because the registry was one operator's
+                // own phone: lose the state file and every deviceId was up for
+                // grabs again — including the chance to wipe a real device's
+                // client list by registering an empty one.
+                //
+                // The durable store closes that window, and a claim code puts
+                // the device under an account. An unclaimed device still routes
+                // commands, because routing needs a client secret only the real
+                // phone can mint, and refusing would break every install that
+                // upgrades into this version. What it does not get is a place
+                // in anyone's panel until its owner claims it.
+                await store.upsertDevice({
+                    id,
+                    accountId: null,
+                    secretHash: sha256(secret),
+                    name: String(payload.deviceName || id).substring(0, 60),
+                    enrolledAt: Date.now()
+                });
+                console.log(`[WS] New device enrolled (unclaimed): ${id}`);
+                addLog(null, 'Android Uygulaması', id, 'Cihaz Kaydoldu', 'info', 'Sahipsiz — panelden bir hesaba bağlanmayı bekliyor.');
             }
 
             deviceId = id;
@@ -822,18 +1005,18 @@ wss.on('connection', (ws) => {
             // The device is the authority on which clients exist. Rebuild its
             // slice of the registry from what it just told us.
             if (Array.isArray(payload.clients)) {
-                for (const [cid, rec] of clients.entries()) {
-                    if (rec.deviceId === id) clients.delete(cid);
-                }
+                const list = [];
                 payload.clients.forEach((c) => {
                     const cid = String(c.clientId || '').trim();
                     const hash = String(c.secretHash || '').trim();
                     if (cid && /^[a-f0-9]{64}$/i.test(hash)) {
-                        clients.set(cid, { deviceId: id, secretHash: hash, name: String(c.name || 'AI istemcisi').substring(0, 60) });
+                        list.push({ id: cid, secretHash: hash, name: String(c.name || 'AI istemcisi').substring(0, 60) });
                     }
                 });
+                await store.replaceDeviceClients(id, list);
             }
-            saveState();
+            await store.touchDevice(id, Date.now());
+            await refreshRegistryCache();
 
             const existing = browsers.get(id);
             if (existing && existing !== ws) {
@@ -841,8 +1024,15 @@ wss.on('connection', (ws) => {
             }
             browsers.set(id, ws);
 
-            addLog(null, 'Android Uygulaması', id, 'Cihaz Bağlandı', 'success', `${clients.size} eşleştirilmiş istemci bildirildi.`);
-            ws.send(JSON.stringify({ type: 'register_ack', deviceId: id, status: 'success' }));
+            const record = devices.get(id);
+            const mine = [...clients.values()].filter((c) => c.deviceId === id).length;
+            addLog(null, 'Android Uygulaması', id, 'Cihaz Bağlandı', 'success', `${mine} eşleştirilmiş istemci bildirildi.`);
+            ws.send(JSON.stringify({
+                type: 'register_ack',
+                deviceId: id,
+                status: 'success',
+                claimed: !!(record && record.accountId)
+            }));
             return;
         }
 
@@ -861,12 +1051,13 @@ wss.on('connection', (ws) => {
             const cid = String(payload.clientId || '').trim();
             const hash = String(payload.secretHash || '').trim();
             if (!cid || !/^[a-f0-9]{64}$/i.test(hash)) return;
-            clients.set(cid, {
+            await store.upsertClient({
+                id: cid,
                 deviceId,
                 secretHash: hash,
                 name: String(payload.name || 'AI istemcisi').substring(0, 60)
             });
-            saveState();
+            await refreshRegistryCache();
             addLog(cid, payload.name, deviceId, 'İstemci Eklendi', 'success', 'Cihaz yeni bir erişim anahtarı üretti.');
             return;
         }
@@ -875,10 +1066,38 @@ wss.on('connection', (ws) => {
             const cid = String(payload.clientId || '').trim();
             const rec = clients.get(cid);
             if (rec && rec.deviceId === deviceId) {
+                await store.deleteClient(cid);
                 clients.delete(cid);
-                saveState();
                 addLog(cid, rec.name, deviceId, 'İstemci İptal Edildi', 'info', 'Kullanıcı erişimi kaldırdı.');
             }
+            return;
+        }
+
+        // The phone asks for a claim code so its owner can attach it to an
+        // account. This is the only thing an unclaimed device may do.
+        if (payload.type === 'request_claim_code') {
+            const device = devices.get(deviceId);
+            if (device && device.accountId) {
+                ws.send(JSON.stringify({ type: 'claim_code', status: 'already_claimed' }));
+                return;
+            }
+            const gate = limits.hit('claim', deviceId);
+            if (!gate.allowed) {
+                ws.send(JSON.stringify({
+                    type: 'claim_code',
+                    status: 'rate_limited',
+                    retryAfterSeconds: gate.retryAfterSeconds
+                }));
+                return;
+            }
+            const claim = await issueClaimCode(deviceId);
+            addLog(null, 'Android Uygulaması', deviceId, 'Bağlama Kodu', 'info', 'Cihaz hesaba bağlanmak için kod istedi.');
+            ws.send(JSON.stringify({
+                type: 'claim_code',
+                status: 'ok',
+                code: claim.code,
+                expiresAt: claim.expiresAt
+            }));
             return;
         }
 
@@ -927,8 +1146,10 @@ function sendSseJsonRpc(sessionId, jsonRpcMessage) {
     const session = sseSessions.get(sessionId);
     const res = session ? session.res : null;
     if (res) {
-        console.log(`[SSE] Sending JSON-RPC response to session ${sessionId}:`, JSON.stringify(jsonRpcMessage));
-        res.write(`event: message\ndata: ${JSON.stringify(jsonRpcMessage)}\n\n`);
+        const encoded = JSON.stringify(jsonRpcMessage);
+        const outcome = jsonRpcMessage && jsonRpcMessage.error ? 'error' : 'response';
+        console.log(`[SSE] JSON-RPC ${outcome} sent (${Buffer.byteLength(encoded, 'utf8')} bytes)`);
+        res.write(`event: message\ndata: ${encoded}\n\n`);
         return true;
     } else {
         console.error(`[SSE] Error: Active session not found for ${sessionId}`);
@@ -956,12 +1177,27 @@ app.get('/sse', (req, res) => {
         res.write(':\n\n');
     }, 15000);
 
+    const plan = limits.planFor(auth.account);
+    const openForClient = [...sseSessions.values()].filter((sess) => sess.clientId === auth.clientId).length;
+    if (openForClient >= plan.maxSseChannelsPerClient) {
+        // An abandoned SSE channel holds a response object open forever; a
+        // client that reconnects in a loop without closing would grow the map
+        // until the process died.
+        return res.status(429).json({
+            error: 'too_many_channels',
+            message: `Bu anahtar için aynı anda en fazla ${plan.maxSseChannelsPerClient} kanal açılabilir. Kullanılmayan MCP istemcilerini kapatın.`
+        });
+    }
+
     sseSessions.set(sessionId, {
         res,
         clientId: auth.clientId,
+        deviceId: auth.record.deviceId,
+        accountId: auth.record.accountId || null,
         secret: auth.secret,
         clientName: auth.record.name,
-        clientInfo: { name: auth.record.name }
+        clientInfo: { name: auth.record.name },
+        openedAt: Date.now()
     });
     console.log(`[MCP] SSE session opened for client ${auth.clientId}`);
     addLog(auth.clientId, auth.record.name, auth.record.deviceId, 'SSE Bağlantısı', 'info', 'İstemci kanalı açtı.');
@@ -1086,9 +1322,11 @@ app.post('/message', async (req, res) => {
             case "browser_navigate": actionType = "navigate"; break;
             case "browser_search": actionType = "search"; break;
             case "browser_get_html": actionType = "get_html"; break;
-            case "browser_get_local_markdown": actionType = "get_local_markdown"; break;
-            case "browser_get_markdown": 
-            case "browser_get_crawl4ai_markdown": actionType = "get_markdown"; break;
+            // One markdown tool. The old names still dispatch so a client
+            // configured before the rename keeps working.
+            case "browser_get_local_markdown":
+            case "browser_get_crawl4ai_markdown":
+            case "browser_get_markdown": actionType = "get_markdown"; break;
             case "browser_scroll": actionType = "scroll"; break;
             case "browser_click": actionType = "click"; break;
             case "browser_type": actionType = "type"; break;
@@ -1116,11 +1354,18 @@ app.post('/message', async (req, res) => {
         const clientName = session.clientName || 'AI istemcisi';
         const boundDeviceId = auth.record.deviceId;
 
+        if (!(await enforceQuota(auth, (message) => {
+            reply({ isError: true, content: [{ type: 'text', text: message }] });
+        }))) {
+            addLog(auth.clientId, clientName, boundDeviceId, `Kota aşıldı: ${toolName}`, 'error', 'Günlük komut kotası doldu.');
+            return res.status(200).send('accepted');
+        }
+
         try {
             addLog(auth.clientId, clientName, boundDeviceId, `Araç: ${toolName}`, 'pending', '');
             const startedAt = Date.now();
             let responseData = await routeCommandToBrowser(actionType, cleanArgs, auth.clientId, auth.secret);
-            responseData = await processCrawl4AIEngine(toolName, responseData, auth.clientId, clientName, boundDeviceId);
+            responseData = finalizeMarkdownResponse(toolName, responseData);
 
             // Metadata only: size and host, never the content itself.
             const parts = [`${Date.now() - startedAt} ms`];
@@ -1148,7 +1393,7 @@ app.post('/message', async (req, res) => {
 
             reply({ content: [{ type: "text", text: JSON.stringify(responseData, null, 2) }] });
         } catch (error) {
-            addLog(auth.clientId, clientName, boundDeviceId, `Hata: ${toolName}`, 'error', String(error.message).substring(0, 160));
+            addLog(auth.clientId, clientName, boundDeviceId, `Hata: ${toolName}`, 'error', error?.name || 'Araç hatası');
             reply({
                 isError: true,
                 content: [{ type: "text", text: `Hata: ${error.message}` }]
@@ -1162,226 +1407,64 @@ app.post('/message', async (req, res) => {
     return res.status(200).send("accepted");
 });
 
-function extractMarkdownFromCrawlResponse(obj) {
-    if (!obj) return null;
-    
-    if (typeof obj === 'string') {
-        const trimmed = obj.trim();
-        if (trimmed && trimmed !== "None" && !trimmed.startsWith('<!DOCTYPE') && !trimmed.startsWith('<html')) {
-            return trimmed;
-        }
-        return null;
-    }
-
-    if (typeof obj !== 'object') return null;
-
-    // 1. Direct priority keys
-    const priorityKeys = ['fit_markdown', 'markdown', 'raw_markdown', 'citations_markdown', 'content_markdown'];
-    for (const key of priorityKeys) {
-        if (obj[key]) {
-            const sub = extractMarkdownFromCrawlResponse(obj[key]);
-            if (sub) return sub;
-        }
-    }
-
-    // 2. Look inside 'results', 'result', 'data', 'items' arrays or objects
-    const containers = ['results', 'result', 'data', 'items'];
-    for (const containerKey of containers) {
-        const val = obj[containerKey];
-        if (Array.isArray(val) && val.length > 0) {
-            for (const item of val) {
-                const sub = extractMarkdownFromCrawlResponse(item);
-                if (sub) return sub;
-            }
-        } else if (val && typeof val === 'object') {
-            const sub = extractMarkdownFromCrawlResponse(val);
-            if (sub) return sub;
-        } else if (typeof val === 'string') {
-            const sub = extractMarkdownFromCrawlResponse(val);
-            if (sub) return sub;
-        }
-    }
-
-    // 3. Look at generic string keys
-    const textKeys = ['content', 'text', 'cleaned_html', 'md'];
-    for (const key of textKeys) {
-        if (obj[key]) {
-            const sub = extractMarkdownFromCrawlResponse(obj[key]);
-            if (sub) return sub;
-        }
-    }
-
-    return null;
+function markMarkdownAsSingleResponse(responseData) {
+    const text = typeof responseData.markdown === 'string' ? responseData.markdown : '';
+    responseData.markdown_offset = 0;
+    responseData.markdown_total_characters = text.length;
+    responseData.markdown_returned_characters = text.length;
+    responseData.has_more = false;
+    responseData.next_offset = null;
+    delete responseData.continuation_hint;
 }
 
-async function processCrawl4AIEngine(toolName, responseData, clientId = null, clientName = null, deviceId = null) {
+/**
+ * Finishes a Markdown response.
+ *
+ * There used to be a Crawl4AI round trip here: the relay shipped the rendered
+ * DOM of a logged-in page to a third service and swapped in its output. It was
+ * removed. The device's own converter is not a generic HTML-to-Markdown pass —
+ * it produces an interaction map whose element numbers `browser_click` reuses,
+ * and no external converter can preserve that. Sending authenticated page HTML
+ * off the device to get a worse representation was a bad trade twice over.
+ *
+ * What is left is bookkeeping: settle the single markdown field, apply the
+ * owner's pagination preference and drop the duplicates.
+ */
+function finalizeMarkdownResponse(toolName, responseData) {
     if (!responseData) return responseData;
 
-    // Capture initial fallback markdown from Android local JS engine
-    const fallbackMarkdown = responseData.markdown || responseData.turndown_markdown || responseData.custom_markdown || "";
+    const markdown = responseData.markdown
+        || responseData.turndown_markdown
+        || responseData.custom_markdown
+        || "";
 
-    // 1. LOCAL MARKDOWN TOOL (browser_get_local_markdown)
-    if (toolName === "browser_get_local_markdown" || toolName === "get_local_markdown") {
-        responseData.markdown = fallbackMarkdown;
-        responseData.engine_used = "Built-in Turndown JS Engine (Local)";
-        responseData.markdown_status = "SUCCESS (Built-in Turndown JS Engine)";
+    const isMarkdownTool = toolName === "browser_get_markdown"
+        || toolName === "browser_get_markdown"
+        || toolName === "browser_get_crawl4ai_markdown"
+        || toolName === "get_markdown"
+        || toolName === "get_local_markdown";
 
-        delete responseData.turndown_markdown;
-        delete responseData.custom_markdown;
-        delete responseData.crawl4ai_markdown;
-        delete responseData.fit_markdown;
-        delete responseData.raw_markdown;
+    if (isMarkdownTool) {
+        responseData.markdown = markdown;
+        responseData.engine_used = "Built-in Markdown Engine (on-device)";
+        responseData.markdown_status = "SUCCESS (Built-in Markdown Engine)";
         delete responseData.html;
-        delete responseData.raw_html;
-
-        return responseData;
-    }
-
-    // 2. HTML TOOL (browser_get_html)
-    if (toolName === "browser_get_html" || toolName === "get_html") {
-        responseData.markdown = fallbackMarkdown;
-        responseData.engine_used = "Built-in Turndown JS Engine (Local)";
-        delete responseData.turndown_markdown;
-        delete responseData.custom_markdown;
-        delete responseData.crawl4ai_markdown;
-        delete responseData.fit_markdown;
-        delete responseData.raw_markdown;
-        delete responseData.raw_html;
-
-        return responseData;
-    }
-
-    // 3. CRAWL4AI MARKDOWN TOOL (browser_get_markdown / browser_get_crawl4ai_markdown)
-    const isCrawlTool = (toolName === "browser_get_markdown" || toolName === "browser_get_crawl4ai_markdown" || toolName === "get_markdown");
-
-    let crawlError = null;
-    let convertedMarkdown = null;
-
-    const targetUrl = (process.env.CRAWL4AI_API_URL || '').trim();
-
-    if (isCrawlTool) {
-        if (!targetUrl) {
-            console.log(`[Crawl4AI] CRAWL4AI_API_URL is NOT configured in environment. Using local Turndown JS fallback engine.`);
-        } else if (responseData.html || responseData.raw_html || responseData.url) {
-            try {
-                const fullRawHtml = responseData.raw_html || responseData.html || '';
-                
-                // Only our own configured token. The MCP client's Authorization
-                // header must never be forwarded to a third-party service.
-                const rawToken = process.env.CRAWL4AI_API_TOKEN || process.env.CRAWL4AI_TOKEN || '';
-
-                let cleanToken = "";
-                if (rawToken) {
-                    cleanToken = String(rawToken).trim().replace(/^Bearer\s+/i, '');
-                }
-
-                const maskedToken = cleanToken ? `${cleanToken.substring(0, 4)}***` : 'NONE';
-                console.log(`[Crawl4AI] Initiating Crawl4AI Engine Request:
-  -> URL: ${targetUrl}
-  -> Page HTML Length: ${fullRawHtml.length} chars
-  -> Page URL: ${responseData.url || 'N/A'}
-  -> Auth Token: ${maskedToken}`);
-
-                addLog(clientId, clientName, deviceId, 'Crawl4AI İsteği', 'info', `${fullRawHtml.length} karakter HTML gönderiliyor.`);
-
-                const crawlHeaders = { 
-                    'Content-Type': 'application/json',
-                    'Bypass-Tunnel-Reminder': 'true',
-                    'User-Agent': 'MCP-Server/1.0'
-                };
-
-                if (cleanToken) {
-                    crawlHeaders['Authorization'] = `Bearer ${cleanToken}`;
-                    crawlHeaders['X-API-Key'] = cleanToken;
-                }
-
-                const pageUrl = (responseData.url && typeof responseData.url === 'string' && responseData.url.trim().length > 0)
-                    ? responseData.url.trim()
-                    : 'https://browser.page';
-
-                const requestBody = {
-                    urls: [pageUrl],
-                    url: pageUrl,
-                    html: fullRawHtml,
-                    raw_html: fullRawHtml,
-                    word_count_threshold: 10,
-                    api_key: cleanToken,
-                    token: cleanToken
-                };
-
-                const crawlRes = await fetch(targetUrl, {
-                    method: 'POST',
-                    headers: crawlHeaders,
-                    signal: AbortSignal.timeout(20000), // 20 seconds timeout
-                    body: JSON.stringify(requestBody)
-                });
-
-                console.log(`[Crawl4AI] HTTP Response Received: Status ${crawlRes.status} ${crawlRes.statusText}`);
-
-                if (crawlRes.ok) {
-                    const crawlJson = await crawlRes.json();
-                    const authenticMarkdown = extractMarkdownFromCrawlResponse(crawlJson);
-                    
-                    if (authenticMarkdown && authenticMarkdown.length > 0) {
-                        console.log(`[Crawl4AI] SUCCESS: Received official Crawl4AI markdown (${authenticMarkdown.length} chars)!`);
-                        convertedMarkdown = authenticMarkdown;
-                        responseData.engine_used = "Official Crawl4AI Python Engine";
-                        responseData.markdown_status = "SUCCESS (Official Crawl4AI Python Engine)";
-                        addLog(clientId, clientName, deviceId, 'Crawl4AI Başarılı', 'success', `${authenticMarkdown.length} karakter markdown üretildi.`);
-                    } else {
-                        console.warn('[Crawl4AI] WARNING: Could not parse markdown from response body.');
-                        crawlError = 'Crawl4AI yanıt biçimi tanınmadı.';
-                        addLog(clientId, clientName, deviceId, 'Crawl4AI Format Hatası', 'error', 'Yanıt 200 döndü ancak markdown çıkarılamadı.');
-                    }
-                } else {
-                    console.error(`[Crawl4AI] ERROR: Service returned HTTP ${crawlRes.status}`);
-                    crawlError = `HTTP ${crawlRes.status}`;
-                    addLog(clientId, clientName, deviceId, 'Crawl4AI Hatası', 'error', `HTTP ${crawlRes.status}`);
-                }
-            } catch (c4err) {
-                console.error(`[Crawl4AI] EXCEPTION: ${c4err.message}`);
-                crawlError = `Exception: ${c4err.message}`;
-                addLog(clientId, clientName, deviceId, 'Crawl4AI Bağlantı Hatası', 'error', String(c4err.message).substring(0, 120));
-            }
-        }
-    }
-
-    // Set single primary markdown field & status information
-    if (convertedMarkdown) {
-        responseData.markdown = convertedMarkdown;
     } else {
-        if (isCrawlTool) {
-            /* 
-            // YEDEK/FALLBACK MEKANİZMASI (Pasife alındı)
-            responseData.markdown = fallbackMarkdown;
-            responseData.engine_used = "Built-in Turndown JS Engine (Local Fallback)";
-            if (crawlError) {
-                responseData.markdown_status = `FALLBACK: Built-in Turndown JS Engine (Crawl4AI Error: ${crawlError})`;
-            } else if (!targetUrl) {
-                responseData.markdown_status = "FALLBACK: Built-in Turndown JS Engine (CRAWL4AI_API_URL not set in Render environment)";
-            } else {
-                responseData.markdown_status = "FALLBACK: Built-in Turndown JS Engine (Crawl4AI returned empty response)";
-            }
-            */
-            responseData.markdown = `Crawl4AI bağlantı başarısız oldu veya dönüşüm yapılamadı.\n\nHata detayı: ${crawlError || 'CRAWL4AI_API_URL eksik veya geçersiz.'}\n\nLütfen yerel çevirimi kullanmak için 'browser_get_local_markdown' aracını çağırın.`;
-            responseData.engine_used = "Crawl4AI Python Engine (FAILED)";
-            responseData.markdown_status = "FAILED";
-        } else {
-            responseData.markdown = fallbackMarkdown;
-        }
+        responseData.markdown = markdown;
     }
 
-    // CLEANUP: Remove duplicate and redundant fields to avoid confusion for AI client
+    // The device already paginated its own payload; this only normalises the
+    // bookkeeping fields for callers that read them.
+    if (typeof responseData.has_more !== 'boolean') {
+        markMarkdownAsSingleResponse(responseData);
+    }
+
     delete responseData.turndown_markdown;
     delete responseData.custom_markdown;
     delete responseData.crawl4ai_markdown;
     delete responseData.fit_markdown;
     delete responseData.raw_markdown;
     delete responseData.raw_html;
-
-    if (isCrawlTool) {
-        delete responseData.html;
-    }
 
     return responseData;
 }
@@ -1400,14 +1483,20 @@ const directToolHandler = async (type, req, res) => {
     const clientName = auth.record.name;
     const deviceId = auth.record.deviceId;
 
+    let quotaMessage = null;
+    if (!(await enforceQuota(auth, (message) => { quotaMessage = message; }))) {
+        addLog(auth.clientId, clientName, deviceId, `Kota aşıldı: ${type}`, 'error', 'Günlük komut kotası doldu.');
+        return res.status(429).json({ error: 'quota_exceeded', message: quotaMessage });
+    }
+
     try {
         addLog(auth.clientId, clientName, deviceId, `REST: ${type}`, 'pending', '');
         let responseData = await routeCommandToBrowser(type, cleanArgs, auth.clientId, auth.secret);
-        responseData = await processCrawl4AIEngine(type, responseData, auth.clientId, clientName, deviceId);
+        responseData = finalizeMarkdownResponse(type, responseData);
         addLog(auth.clientId, clientName, deviceId, `REST tamam: ${type}`, 'success', hostOf(responseData.url));
         return res.json({ status: "success", data: responseData });
     } catch (error) {
-        addLog(auth.clientId, clientName, deviceId, `REST hata: ${type}`, 'error', String(error.message).substring(0, 160));
+        addLog(auth.clientId, clientName, deviceId, `REST hata: ${type}`, 'error', error?.name || 'Araç hatası');
         return res.status(502).json({ status: "error", error: error.message });
     }
 };
@@ -1423,11 +1512,11 @@ const fallbackRoutes = [
     { path: '/mcp/tools/browser_get_html', type: 'get_html' },
     { path: '/tools/browser_get_html', type: 'get_html' },
     
-    { path: '/mcp/tools/browser_get_local_markdown', type: 'get_local_markdown' },
-    { path: '/tools/browser_get_local_markdown', type: 'get_local_markdown' },
-    
     { path: '/mcp/tools/browser_get_markdown', type: 'get_markdown' },
     { path: '/tools/browser_get_markdown', type: 'get_markdown' },
+    // Retired names, still routed so an older client keeps working.
+    { path: '/mcp/tools/browser_get_local_markdown', type: 'get_markdown' },
+    { path: '/tools/browser_get_local_markdown', type: 'get_markdown' },
     { path: '/mcp/tools/browser_get_crawl4ai_markdown', type: 'get_markdown' },
     { path: '/tools/browser_get_crawl4ai_markdown', type: 'get_markdown' },
     
@@ -1460,198 +1549,449 @@ app.all(['/mcp/tools/browser_get_tool_documentation', '/tools/browser_get_tool_d
     return res.json(toolDocResponse);
 });
 
-// Operator status endpoint. Requires ADMIN_TOKEN; without one configured the
-// endpoint stays closed rather than defaulting to public.
-app.get('/api/status', (req, res) => {
-    if (!ADMIN_PUBLIC) {
-        if (!ADMIN_TOKEN) {
-            return res.status(503).json({ error: 'admin_disabled', message: 'ADMIN_TOKEN ortam değişkeni tanımlı değil; izleme paneli kapalı.' });
-        }
-        const header = req.headers['authorization'] || '';
-        const provided = header.toLowerCase().startsWith('bearer ') ? header.substring(7).trim() : (req.headers['x-admin-token'] || '');
-        if (!safeEquals(provided, ADMIN_TOKEN)) {
-            return res.status(401).json({ error: 'unauthorized' });
+// ----------------------------------------------------
+// CONTROL PANEL
+//
+// Server-rendered, session-gated, and scoped to one account everywhere. The
+// old console had a single shared token and showed every device on the relay
+// plus a live feed of the hosts each one was visiting. With accounts that is
+// not a convenience any more, it is one tenant reading another's browsing.
+//
+// Every query below filters by `session.accountId`. A query here without that
+// filter is a data leak, not a bug in presentation — treat it that way.
+// ----------------------------------------------------
+
+function panelHeaders(res) {
+    // No script at all on these pages, so the strictest policy is also the
+    // simplest one. Data rendered here is device and client names other people
+    // chose; nothing should be in a position to run it.
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Security-Policy',
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+}
+
+/** Resolves the panel session, or null. Also refreshes `last_seen_at`. */
+async function currentSession(req) {
+    const cookies = accounts.parseCookies(req);
+    const token = cookies[accounts.SESSION_COOKIE];
+    if (!token) return null;
+    const session = await store.getWebSession(accounts.sessionIdHash(token));
+    if (!accounts.sessionIsUsable(session)) return null;
+    const account = await store.getAccountById(session.accountId);
+    if (!account || account.status !== 'active') return null;
+    if (!session.lastSeenAt || Date.now() - session.lastSeenAt > 60000) {
+        store.touchWebSession(session.idHash, Date.now()).catch(() => {});
+    }
+    return { session, account, csrf: cookies[accounts.CSRF_COOKIE] || '' };
+}
+
+/**
+ * Double-submit CSRF check.
+ *
+ * `SameSite=Lax` already blocks cross-site POSTs in current browsers; this is
+ * the belt to that pair of braces, and it costs one hidden field.
+ */
+function csrfOk(req, ctx) {
+    const sent = String((req.body && req.body._csrf) || '');
+    return !!ctx.csrf && accounts.safeEquals(sent, ctx.csrf);
+}
+
+async function requirePanelSession(req, res) {
+    const ctx = await currentSession(req);
+    if (!ctx) {
+        res.redirect(303, '/login');
+        return null;
+    }
+    return ctx;
+}
+
+function ensureCsrfCookie(req, res, existing) {
+    if (existing) return existing;
+    const token = accounts.newCsrfToken();
+    accounts.setCsrfCookie(req, res, token);
+    return token;
+}
+
+// --- auth pages ---
+
+app.get(['/login', '/register'], async (req, res) => {
+    const ctx = await currentSession(req);
+    if (ctx) return res.redirect(303, '/');
+    const cookies = accounts.parseCookies(req);
+    const csrf = ensureCsrfCookie(req, res, cookies[accounts.CSRF_COOKIE]);
+    const mode = req.path === '/register' ? 'register' : 'login';
+    if (mode === 'register' && !ALLOW_REGISTRATION) {
+        panelHeaders(res);
+        return res.send(panel.renderLogin({
+            mode: 'login', csrf,
+            error: 'Bu röle yeni kayıtlara kapalı.'
+        }));
+    }
+    panelHeaders(res);
+    res.send(panel.renderLogin({ mode, csrf, notice: req.query.ok ? 'Hesabınız oluşturuldu, giriş yapabilirsiniz.' : '' }));
+});
+
+app.post('/auth/register', async (req, res) => {
+    const cookies = accounts.parseCookies(req);
+    const csrf = ensureCsrfCookie(req, res, cookies[accounts.CSRF_COOKIE]);
+    const fail = (message, email) => {
+        panelHeaders(res);
+        res.status(400).send(panel.renderLogin({ mode: 'register', csrf, error: message, email }));
+    };
+
+    if (!ALLOW_REGISTRATION) return fail('Bu röle yeni kayıtlara kapalı.');
+    if (!accounts.safeEquals(String((req.body && req.body._csrf) || ''), csrf)) {
+        return fail('Form doğrulaması başarısız. Sayfayı yenileyip tekrar deneyin.');
+    }
+
+    const gate = limits.hit('register', limits.clientIp(req));
+    if (!gate.allowed) {
+        res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+        return fail('Çok fazla kayıt denemesi. Bir süre sonra tekrar deneyin.');
+    }
+
+    const email = accounts.normaliseEmail(req.body && req.body.email);
+    const password = String((req.body && req.body.password) || '');
+
+    const emailIssue = accounts.emailProblem(email);
+    if (emailIssue) return fail(emailIssue, email);
+    const passwordIssue = accounts.passwordProblem(password);
+    if (passwordIssue) return fail(passwordIssue, email);
+
+    const existing = await store.getAccountByEmail(email);
+    if (existing) {
+        // Same wording as a bad password on login, for the same reason: this
+        // form must not become a way to test which addresses have accounts.
+        return fail('Bu e-posta ile kayıt oluşturulamadı.', email);
+    }
+
+    const { passwordHash, passwordSalt } = await accounts.hashPassword(password);
+    const account = await store.createAccount({ email, passwordHash, passwordSalt });
+    console.log(`[Auth] Yeni hesap: ${account.id}`);
+    res.redirect(303, '/login?ok=1');
+});
+
+app.post('/auth/login', async (req, res) => {
+    const cookies = accounts.parseCookies(req);
+    const csrf = ensureCsrfCookie(req, res, cookies[accounts.CSRF_COOKIE]);
+    const email = accounts.normaliseEmail(req.body && req.body.email);
+    const password = String((req.body && req.body.password) || '');
+
+    const fail = (message) => {
+        panelHeaders(res);
+        res.status(401).send(panel.renderLogin({ mode: 'login', csrf, error: message, email }));
+    };
+
+    if (!accounts.safeEquals(String((req.body && req.body._csrf) || ''), csrf)) {
+        return fail('Form doğrulaması başarısız. Sayfayı yenileyip tekrar deneyin.');
+    }
+
+    // Two counters: one per address so a single account cannot be ground down,
+    // one per address+IP so a shared office address is not locked out by a
+    // neighbour's typo.
+    const ip = limits.clientIp(req);
+    for (const key of [`e:${email}`, `i:${ip}`]) {
+        const gate = limits.hit('login', key);
+        if (!gate.allowed) {
+            res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+            return fail(`Çok fazla giriş denemesi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`);
         }
     }
+
+    const account = await store.getAccountByEmail(email);
+    const ok = account && await accounts.verifyPassword(password, account.passwordHash, account.passwordSalt);
+    if (!ok) {
+        // One message for "no such account" and "wrong password": telling them
+        // apart turns this form into an address oracle.
+        return fail('E-posta veya parola hatalı.');
+    }
+    if (account.status !== 'active') {
+        return fail('Bu hesap askıya alınmış.');
+    }
+
+    limits.reset('login', `e:${email}`);
+    limits.reset('login', `i:${ip}`);
+
+    const token = accounts.newSessionToken();
+    await store.createWebSession({
+        idHash: accounts.sessionIdHash(token),
+        accountId: account.id,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + accounts.SESSION_TTL_MS,
+        lastSeenAt: Date.now(),
+        userAgentHash: accounts.sha256(String(req.headers['user-agent'] || '')).substring(0, 32)
+    });
+    accounts.setSessionCookie(req, res, token);
+    accounts.setCsrfCookie(req, res, accounts.newCsrfToken());
+    res.redirect(303, '/');
+});
+
+app.post('/auth/logout', async (req, res) => {
+    const cookies = accounts.parseCookies(req);
+    const token = cookies[accounts.SESSION_COOKIE];
+    if (token) await store.revokeWebSession(accounts.sessionIdHash(token));
+    accounts.clearAuthCookies(req, res);
+    res.redirect(303, '/login');
+});
+
+// --- overview ---
+
+app.get('/', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+    const csrf = ensureCsrfCookie(req, res, ctx.csrf);
+
+    const [deviceList, clientList, usage] = await Promise.all([
+        store.listDevices(ctx.account.id),
+        store.listClients(ctx.account.id),
+        store.getUsage(ctx.account.id, limits.currentUsageWindow())
+    ]);
+
+    const owned = new Set(deviceList.map((d) => d.id));
+    const openSessions = [...sseSessions.values()]
+        .filter((sess) => owned.has(sess.deviceId)).length;
+
+    const unclaimed = [...devices.values()].some((d) => !d.accountId && browsers.has(d.id));
+
+    panelHeaders(res);
+    res.send(panel.renderOverview({
+        account: ctx.account,
+        plan: limits.planFor(ctx.account),
+        devices: deviceList,
+        clients: clientList,
+        connectedDeviceIds: [...browsers.keys()],
+        openSessions,
+        usage,
+        csrf,
+        error: req.query.err ? String(req.query.err).substring(0, 200) : '',
+        notice: req.query.ok ? String(req.query.ok).substring(0, 200) : '',
+        unclaimedHint: unclaimed && deviceList.length === 0,
+        storeWarning: store.durable ? '' :
+            'Bu röle kalıcı bir veritabanı olmadan çalışıyor (DATABASE_URL tanımlı değil). Hesaplar ve cihaz bağları bir sonraki dağıtımda kaybolabilir.'
+    }));
+});
+
+app.post('/devices/claim', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
+
+    const gate = limits.hit('claim', `a:${ctx.account.id}`);
+    if (!gate.allowed) {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Çok fazla deneme. Biraz sonra tekrar deneyin.'));
+    }
+
+    const plan = limits.planFor(ctx.account);
+    const owned = await store.countDevices(ctx.account.id);
+    if (owned >= plan.maxDevices) {
+        return res.redirect(303, '/?err=' + encodeURIComponent(
+            `${plan.label} planı ${plan.maxDevices} cihazla sınırlı. Yeni bir cihaz bağlamak için önce birinin bağını koparın.`));
+    }
+
+    const code = normaliseClaimCode(req.body && req.body.code);
+    const claim = code ? await store.consumeClaimCode(code) : null;
+    if (!claim) {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Kod geçersiz, kullanılmış veya süresi dolmuş. Telefondan yeni bir kod alın.'));
+    }
+
+    const device = await store.getDevice(claim.deviceId);
+    if (!device) {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Kodun ait olduğu cihaz artık kayıtlı değil.'));
+    }
+    if (device.accountId && device.accountId !== ctx.account.id) {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Bu cihaz başka bir hesaba bağlı.'));
+    }
+
+    await store.setDeviceAccount(device.id, ctx.account.id);
+    await refreshRegistryCache();
+    addLog(null, 'Panel', device.id, 'Cihaz Bağlandı', 'success', 'Cihaz hesaba bağlandı.');
+
+    const ws = browsers.get(device.id);
+    if (ws && ws.readyState === 1) {
+        try { ws.send(JSON.stringify({ type: 'claim_result', status: 'claimed' })); } catch (e) {}
+    }
+
+    res.redirect(303, '/?ok=' + encodeURIComponent('Cihaz hesabınıza bağlandı.'));
+});
+
+app.post('/devices/release', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
+
+    const deviceId = String((req.body && req.body.deviceId) || '').trim();
+    const device = await store.getDevice(deviceId);
+    if (!device || device.accountId !== ctx.account.id) {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Bu cihaz sizin hesabınıza bağlı değil.'));
+    }
+
+    await store.setDeviceAccount(deviceId, null);
+    await refreshRegistryCache();
+    addLog(null, 'Panel', deviceId, 'Cihaz Bağı Koparıldı', 'info', 'Cihaz hesaptan ayrıldı.');
+
+    const ws = browsers.get(deviceId);
+    if (ws && ws.readyState === 1) {
+        try { ws.send(JSON.stringify({ type: 'claim_result', status: 'released' })); } catch (e) {}
+    }
+
+    res.redirect(303, '/?ok=' + encodeURIComponent('Cihazın bağı koparıldı.'));
+});
+
+app.post('/clients/revoke', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
+
+    const clientId = String((req.body && req.body.clientId) || '').trim();
+    const record = await store.getClient(clientId);
+    if (!record || record.accountId !== ctx.account.id) {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Bu istemci sizin hesabınıza bağlı değil.'));
+    }
+
+    await store.deleteClient(clientId);
+    clients.delete(clientId);
+
+    // Cut any channel the key is holding open right now. Revocation that only
+    // takes effect on the next connection is not revocation.
+    sseSessions.forEach((sess, id) => {
+        if (sess.clientId === clientId) {
+            try { sess.res.end(); } catch (e) {}
+            sseSessions.delete(id);
+        }
+    });
+
+    // Tell the phone so its own client list matches what the panel just did.
+    const ws = browsers.get(record.deviceId);
+    if (ws && ws.readyState === 1) {
+        try { ws.send(JSON.stringify({ type: 'client_revoked', clientId })); } catch (e) {}
+    }
+
+    addLog(clientId, record.name, record.deviceId, 'İstemci İptal Edildi', 'info', 'Panelden iptal edildi.');
+    res.redirect(303, '/?ok=' + encodeURIComponent('İstemci erişimi iptal edildi.'));
+});
+
+// --- audit ---
+
+app.get('/audit', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+
+    const filters = {
+        deviceId: String(req.query.deviceId || '').trim() || null,
+        clientId: String(req.query.clientId || '').trim() || null
+    };
+    const [events, deviceList, clientList] = await Promise.all([
+        store.listAudit(ctx.account.id, { limit: 300, ...filters }),
+        store.listDevices(ctx.account.id),
+        store.listClients(ctx.account.id)
+    ]);
+
+    panelHeaders(res);
+    res.send(panel.renderAudit({
+        account: ctx.account,
+        plan: limits.planFor(ctx.account),
+        events,
+        devices: deviceList,
+        clients: clientList,
+        filters
+    }));
+});
+
+app.get('/audit/export', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+
+    const events = await store.listAudit(ctx.account.id, { limit: 5000 });
+    const cell = (v) => {
+        const text = String(v === null || v === undefined ? '' : v);
+        return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const rows = [['zaman', 'durum', 'eylem', 'cihaz', 'istemci', 'host', 'ayrinti']];
+    events.forEach((e) => rows.push([
+        new Date(e.createdAt).toISOString(), e.status, e.action,
+        e.deviceId || '', e.clientId || '', e.host || '', e.detail || ''
+    ]));
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="denetim-kaydi.csv"');
+    res.send(rows.map((r) => r.map(cell).join(',')).join('\n'));
+});
+
+// --- account ---
+
+app.get('/account', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+    const csrf = ensureCsrfCookie(req, res, ctx.csrf);
+    panelHeaders(res);
+    res.send(panel.renderAccount({
+        account: ctx.account,
+        plan: limits.planFor(ctx.account),
+        csrf,
+        activeSessions: '—',
+        error: req.query.err ? String(req.query.err).substring(0, 200) : '',
+        notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
+    }));
+});
+
+app.post('/account/password', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, '/account?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
+
+    const current = String((req.body && req.body.current) || '');
+    const next = String((req.body && req.body.next) || '');
+
+    const ok = await accounts.verifyPassword(current, ctx.account.passwordHash, ctx.account.passwordSalt);
+    if (!ok) return res.redirect(303, '/account?err=' + encodeURIComponent('Mevcut parola hatalı.'));
+
+    const issue = accounts.passwordProblem(next);
+    if (issue) return res.redirect(303, '/account?err=' + encodeURIComponent(issue));
+
+    const { passwordHash, passwordSalt } = await accounts.hashPassword(next);
+    await store.setAccountPassword(ctx.account.id, passwordHash, passwordSalt);
+    // A password change is also how someone reacts to a stolen laptop, so it
+    // has to end every other session, not just change the secret.
+    await store.revokeAccountSessions(ctx.account.id, ctx.session.idHash);
+    res.redirect(303, '/account?ok=' + encodeURIComponent('Parola değişti; diğer oturumlar kapatıldı.'));
+});
+
+app.post('/account/sessions/revoke', async (req, res) => {
+    const ctx = await requirePanelSession(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, '/account?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
+    const n = await store.revokeAccountSessions(ctx.account.id, ctx.session.idHash);
+    res.redirect(303, '/account?ok=' + encodeURIComponent(`${n} oturum kapatıldı.`));
+});
+
+// A JSON view of the same, for anyone scripting against their own account.
+app.get('/api/status', async (req, res) => {
+    const ctx = await currentSession(req);
+    if (!ctx) return res.status(401).json({ error: 'unauthorized', message: 'Panel oturumu gerekli.' });
+
+    const [deviceList, clientList, usage] = await Promise.all([
+        store.listDevices(ctx.account.id),
+        store.listClients(ctx.account.id),
+        store.getUsage(ctx.account.id, limits.currentUsageWindow())
+    ]);
+    const owned = new Set(deviceList.map((d) => d.id));
+
     res.json({
-        status: "running",
-        connected_devices: Array.from(browsers.keys()),
-        paired_clients: Array.from(clients.entries()).map(([id, c]) => ({ id, name: c.name, deviceId: c.deviceId })),
-        active_sessions: sseSessions.size,
-        logs
+        status: 'running',
+        account: { email: ctx.account.email, plan: ctx.account.plan },
+        devices: deviceList.map((d) => ({
+            id: d.id, name: d.name, online: browsers.has(d.id), lastSeenAt: d.lastSeenAt
+        })),
+        clients: clientList.map((c) => ({ id: c.id, name: c.name, deviceId: c.deviceId })),
+        open_channels: [...sseSessions.values()].filter((sess) => owned.has(sess.deviceId)).length,
+        usage,
+        durable_store: store.durable
     });
 });
 
-// ----------------------------------------------------
-// OPERATOR CONSOLE
-// Everything here renders through the DOM API, never innerHTML: log rows carry
-// client-supplied names and device ids, and this page is opened by the person
-// who can least afford to run somebody else's script.
-// ----------------------------------------------------
-app.get('/', (req, res) => {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'");
-    res.send(`<!DOCTYPE html>
-<html lang="tr">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MCP Köprü Konsolu</title>
-<style>
-  :root{--bg:#0b1120;--card:#141d2b;--line:#25303f;--text:#e7eaee;--muted:#8b97a5;--accent:#d3ab68;--ok:#7fb88c;--err:#e97c6e}
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
-  .wrap{max-width:1080px;margin:0 auto;padding:32px 20px 64px;display:flex;flex-direction:column;gap:20px}
-  h1{font:600 20px/1.2 ui-monospace,Consolas,monospace;margin:0}
-  .sub{color:var(--muted);font-size:13px;margin:0}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:18px;display:flex;flex-direction:column;gap:12px}
-  h2{font:600 11px/1 ui-monospace,Consolas,monospace;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0}
-  input{background:#0b1120;border:1px solid var(--line);border-radius:6px;color:var(--text);padding:9px 12px;font:13px ui-monospace,Consolas,monospace;flex:1;min-width:0}
-  button{background:var(--accent);color:#141d2b;border:0;border-radius:6px;padding:9px 16px;font-weight:600;cursor:pointer}
-  button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-  .row{display:flex;gap:10px;flex-wrap:wrap}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-  .stat{background:#0b1120;border:1px solid var(--line);border-radius:6px;padding:12px}
-  .stat .n{font:700 26px/1.1 ui-monospace,Consolas,monospace}
-  .stat .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
-  ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
-  li{background:#0b1120;border:1px solid var(--line);border-radius:6px;padding:8px 12px;font:12px ui-monospace,Consolas,monospace;overflow-wrap:anywhere}
-  .log{display:flex;flex-direction:column;gap:2px}
-  .log .top{display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted)}
-  .log .act{font-size:12px;color:var(--text)}
-  .log .det{font-size:11px;color:var(--muted)}
-  .s-success{color:var(--ok)} .s-error{color:var(--err)} .s-pending{color:var(--accent)}
-  .empty{color:var(--muted);font-style:italic;font-size:12px}
-  code{color:var(--accent)}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div>
-    <h1>MCP Köprü Konsolu</h1>
-    <p class="sub">Bu köprü kimlik doğrulaması gerektirir. AI istemcileri Android uygulamasından alınan eşleştirme kodu ile bağlanır.</p>
-  </div>
-
-  <div class="card" id="login">
-    <h2>Operatör Girişi</h2>
-    <div class="row">
-      <input id="tok" type="password" placeholder="ADMIN_TOKEN" autocomplete="off">
-      <button id="go">Bağlan</button>
-    </div>
-    <p class="sub" id="msg"></p>
-  </div>
-
-  <div class="card" id="panel" hidden>
-    <h2>Durum</h2>
-    <div class="grid">
-      <div class="stat"><div class="n" id="c-dev">0</div><div class="l">Bağlı Cihaz</div></div>
-      <div class="stat"><div class="n" id="c-cli">0</div><div class="l">Eşleşmiş İstemci</div></div>
-      <div class="stat"><div class="n" id="c-ses">0</div><div class="l">Açık Oturum</div></div>
-    </div>
-    <h2>Cihazlar</h2>
-    <ul id="devs"></ul>
-    <h2>İstemciler</h2>
-    <ul id="clis"></ul>
-    <h2>Son İşlemler</h2>
-    <ul id="logs"></ul>
-  </div>
-
-  <div class="card">
-    <h2>İstemci Kurulumu</h2>
-    <p class="sub">1 · Android uygulamasında <b>Ayarlar → Oturumlar → AI istemcisi ekle</b> ile bir erişim anahtarı üretin.</p>
-    <p class="sub">2 · Anahtarı kopyalayın — yalnızca üretildiği anda görünür, cihaz sadece özetini saklar.</p>
-    <p class="sub">3 · MCP istemcinizde <code>Authorization: Bearer &lt;clientId&gt;.&lt;secret&gt;</code> olarak tanımlayın; SSE adresi <code id="sse"></code>.</p>
-  </div>
-</div>
-
-<script>
-  document.getElementById('sse').textContent = location.origin + '/sse';
-
-  var token = sessionStorage.getItem('mcp_admin') || '';
-  var timer = null;
-  // Server-side flag: when the console is public there is nothing to log in to.
-  var PUBLIC = ${ADMIN_PUBLIC ? 'true' : 'false'};
-
-  function el(tag, cls, text){
-    var n = document.createElement(tag);
-    if (cls) n.className = cls;
-    if (text !== undefined && text !== null) n.textContent = String(text);
-    return n;
-  }
-
-  function fill(listId, items, render){
-    var ul = document.getElementById(listId);
-    ul.replaceChildren();
-    if (!items || items.length === 0){
-      ul.appendChild(el('li', 'empty', 'Kayıt yok.'));
-      return;
-    }
-    items.forEach(function(item){ ul.appendChild(render(item)); });
-  }
-
-  function renderLog(log){
-    var li = el('li', 'log');
-    var top = el('div', 'top');
-    top.appendChild(el('span', null, log.timestamp));
-    top.appendChild(el('span', 's-' + log.status, '[' + String(log.status).toUpperCase() + ']'));
-    top.appendChild(el('span', null, log.clientName));
-    top.appendChild(el('span', null, '→ ' + log.deviceId));
-    li.appendChild(top);
-    li.appendChild(el('div', 'act', log.action));
-    if (log.detail) li.appendChild(el('div', 'det', log.detail));
-    return li;
-  }
-
-  async function refresh(){
-    try{
-      var r = await fetch('/api/status', PUBLIC ? {} : { headers: { 'Authorization': 'Bearer ' + token } });
-      if (r.status === 401){ stop('Token geçersiz.'); return; }
-      if (r.status === 503){ stop('Sunucuda ADMIN_TOKEN tanımlı değil.'); return; }
-      if (!r.ok){ return; }
-      var d = await r.json();
-      document.getElementById('panel').hidden = false;
-      document.getElementById('msg').textContent = '';
-      document.getElementById('c-dev').textContent = d.connected_devices.length;
-      document.getElementById('c-cli').textContent = d.paired_clients.length;
-      document.getElementById('c-ses').textContent = d.active_sessions;
-      fill('devs', d.connected_devices, function(id){ return el('li', null, id); });
-      fill('clis', d.paired_clients, function(c){ return el('li', null, c.name + '  ·  ' + c.id + '  ·  ' + c.deviceId); });
-      fill('logs', d.logs, renderLog);
-    }catch(e){ /* transient network error, next tick retries */ }
-  }
-
-  function stop(message){
-    clearInterval(timer); timer = null;
-    sessionStorage.removeItem('mcp_admin');
-    document.getElementById('panel').hidden = true;
-    document.getElementById('msg').textContent = message;
-  }
-
-  function start(){
-    if (!PUBLIC){
-      token = document.getElementById('tok').value.trim() || token;
-      if (!token){ document.getElementById('msg').textContent = 'Token girin.'; return; }
-      sessionStorage.setItem('mcp_admin', token);
-    }
-    refresh();
-    clearInterval(timer);
-    timer = setInterval(refresh, 3000);
-  }
-
-  document.getElementById('go').addEventListener('click', start);
-  document.getElementById('tok').addEventListener('keydown', function(e){ if (e.key === 'Enter') start(); });
-  if (PUBLIC){
-    document.getElementById('login').hidden = true;
-    start();
-  } else if (token) {
-    start();
-  }
-</script>
-</body>
-</html>`);
-});
-
-// Health check that reveals nothing.
 app.get('/healthz', (req, res) => res.json({ status: 'ok' }));
 
 // NOTE: The previous build exposed /oauth/authorize, /oauth/token and
@@ -1663,34 +2003,63 @@ app.get('/healthz', (req, res) => res.json({ status: 'ok' }));
 
 // Start listening
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => {
-    console.log('=================================================');
-    console.log(` MCP Bridge Server listening on port ${PORT}`);
-    console.log(` - Console:  http://localhost:${PORT}/`);
-    console.log(` - MCP SSE:  http://localhost:${PORT}/sse   (kimlik doğrulaması gerekli)`);
-    console.log(``);
-    console.log(` - Enrolled: ${devices.size} cihaz, ${clients.size} istemci`);
-    if (ADMIN_PUBLIC) {
-        console.warn(' ! ADMIN_PUBLIC açık — operatör konsolu herkese açık.');
-        console.warn('   Panel salt okunurdur ve sır göstermez, ama eşleşmiş istemcileri ve');
-        console.warn('   ziyaret edilen alan adlarını listeler. Kapatmak için ADMIN_PUBLIC=false.');
-    } else if (ADMIN_TOKEN_TOO_SHORT) {
-        console.warn(` ! ADMIN_TOKEN ${ADMIN_TOKEN_MIN_LENGTH} karakterden kısa — yok sayıldı, operatör konsolu kapalı.`);
-        console.warn('   Üretmek için: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
-    } else if (!ADMIN_TOKEN) {
-        console.warn(' ! ADMIN_TOKEN tanımlı değil — operatör konsolu kapalı.');
+
+/**
+ * Audit retention.
+ *
+ * Kept per plan rather than globally, and swept rather than trimmed on write:
+ * a delete pass once an hour is cheaper than a bounds check on every insert,
+ * and nobody minds a row living an extra fifty minutes.
+ */
+const AUDIT_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+async function sweepAudit() {
+    try {
+        const longest = Math.max(...Object.values(limits.PLANS).map((p) => p.auditRetentionDays));
+        const removed = await store.pruneAudit(Date.now() - longest * 86400000);
+        if (removed > 0) console.log(`[Audit] ${removed} eski kayıt silindi.`);
+    } catch (e) {
+        console.warn('[Audit] Temizlik başarısız:', e.message);
     }
-    console.log('=================================================');
+}
+
+async function main() {
+    store = await openStore();
+    await refreshRegistryCache();
+
+    const unclaimed = [...devices.values()].filter((d) => !d.accountId).length;
+
+    const sweeper = setInterval(sweepAudit, AUDIT_SWEEP_INTERVAL_MS);
+    if (sweeper.unref) sweeper.unref();
+
+    server.listen(PORT, () => {
+        console.log('=================================================');
+        console.log(` MCP Bridge Server listening on port ${PORT}`);
+        console.log(` - Panel:    http://localhost:${PORT}/`);
+        console.log(` - MCP SSE:  http://localhost:${PORT}/sse   (kimlik doğrulaması gerekli)`);
+        console.log(``);
+        console.log(` - Depo:     ${store.kind}${store.durable ? '' : ' (kalıcı değil)'}`);
+        console.log(` - Kayıtlı:  ${devices.size} cihaz, ${clients.size} istemci`);
+        if (unclaimed > 0) {
+            console.warn(` ! ${unclaimed} cihaz hiçbir hesaba bağlı değil. Sahipleri panelden bağlayana`);
+            console.warn('   kadar panelde görünmezler; komut yönlendirmeye devam ederler.');
+        }
+        if (!store.durable) {
+            console.warn(' ! DATABASE_URL tanımlı değil. Hesaplar ve cihaz bağları bir JSON dosyasında');
+            console.warn('   tutuluyor; Render gibi ortamlarda bu dosya her dağıtımda silinir.');
+        }
+        if (!ALLOW_REGISTRATION) {
+            console.log(' - Kayıt:    kapalı (ALLOW_REGISTRATION=false)');
+        }
+        console.log('=================================================');
+    });
+}
+
+main().catch((e) => {
+    console.error('[Boot] Başlatılamadı:', e.message);
+    process.exit(1);
 });
 
-// ----------------------------------------------------
-// GRACEFUL SHUTDOWN
-// Render sends SIGTERM on every deploy. Without this the process dies mid-flight:
-// the debounced state write is lost with its timer, phones see a dead socket
-// instead of a close frame (so they wait for the 45-second watchdog instead of
-// reconnecting at once), and MCP clients are left holding an SSE stream that
-// will never answer again.
-// ----------------------------------------------------
 let shuttingDown = false;
 
 function shutdown(signal) {
@@ -1699,7 +2068,14 @@ function shutdown(signal) {
     console.log(`[Shutdown] ${signal} alındı, kapanılıyor...`);
 
     // Flush first: everything below can fail without costing us the registry.
-    writeStateNow();
+    // `close` is fire-and-forget because the forced-exit timer below is the
+    // real deadline — a database that will not close must not hold a deploy.
+    if (store) {
+        Promise.resolve()
+            .then(() => flushAudit())
+            .then(() => store.close())
+            .catch(() => {});
+    }
 
     // Stop taking new work before tearing down the old.
     server.close(() => {

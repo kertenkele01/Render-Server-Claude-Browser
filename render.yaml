@@ -2,11 +2,10 @@
 #
 # Deploy with: Render Dashboard → New → Blueprint → pick this repository.
 #
-# IMPORTANT: the bridge keeps connected devices, paired clients and open MCP
-# sessions in memory. Running more than one instance silently breaks it — a
-# device's WebSocket lands on instance A while its tool calls land on B.
-# Keep numInstances at 1 until the control plane (accounts + shared state)
-# exists.
+# IMPORTANT: the relay keeps live WebSockets and open MCP sessions in memory.
+# Running more than one instance silently breaks it — a device's socket lands on
+# instance A while its tool calls land on B. Accounts and the registry are in
+# Postgres now, but the sockets cannot be shared, so numInstances stays 1.
 
 services:
   # ---------------------------------------------------------------------------
@@ -22,16 +21,18 @@ services:
     healthCheckPath: /healthz
     numInstances: 1
     envVars:
-      # Unlocks the operator console at "/" and GET /api/status.
-      # Render generates a strong value on first deploy; read it from the
-      # dashboard under Environment.
-      - key: ADMIN_TOKEN
-        generateValue: true
+      # Accounts, devices, clients, claim codes, the audit trail and usage
+      # counters. Without it the relay still boots but keeps all of that in a
+      # JSON file on an ephemeral disk — every deploy would take the accounts
+      # with it. It warns about this at startup and in the panel.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-browser-bridge-db
+          property: connectionString
 
-      # Set to "true" to drop the console login entirely. Read-only either way,
-      # but it publishes paired clients and the hosts the phone visits, so this
-      # is an opt-in you make knowingly. sync:false keeps it out of git.
-      - key: ADMIN_PUBLIC
+      # Close signups once your own account exists. Leave unset (open) for the
+      # first deploy, then set to "false" in the dashboard.
+      - key: ALLOW_REGISTRATION
         sync: false
 
       # Origins allowed to call the bridge from a browser and to open a
@@ -40,41 +41,20 @@ services:
       - key: ALLOWED_ORIGINS
         value: ""
 
-      # Crawl4AI powers browser_get_markdown. Set these in the dashboard after
-      # the crawl4ai service below is live; sync:false keeps them out of git.
-      - key: CRAWL4AI_API_URL
-        sync: false
-      - key: CRAWL4AI_API_TOKEN
-        sync: false
+      # Rate-limit ceilings. Defaults live in lib/limits.js; override one only
+      # with a reason — a shared office behind a single NAT address is the usual
+      # one for LIMIT_REGISTER_MAX.
+      # - key: LIMIT_REGISTER_MAX
+      #   value: "20"
 
-      # --- Persistent state (paid plans only) ---------------------------------
-      # The free plan has an ephemeral filesystem, so the device/client registry
-      # is rebuilt from scratch after every deploy. It self-heals when the phone
-      # reconnects, but the device-identity protection resets in the meantime.
-      # To make it durable: switch plan to "starter", uncomment the disk block
-      # below and this variable.
-      # - key: BRIDGE_STATE_FILE
-      #   value: /var/data/bridge-state.json
-    # disk:
-    #   name: bridge-state
-    #   mountPath: /var/data
-    #   sizeGB: 1
-
-  # ---------------------------------------------------------------------------
-  # Crawl4AI markdown service (optional)
-  # The bridge works without it; browser_get_local_markdown is unaffected.
-  # Needs more memory than the free plan allows, so it starts on "starter".
-  # ---------------------------------------------------------------------------
-  - type: web
-    name: ai-browser-crawl4ai
-    runtime: docker
-    plan: starter
+databases:
+  # Render's free Postgres expires after a limited trial period; move it to a
+  # paid plan before that if the deployment is more than an experiment. Losing
+  # this database means losing accounts and device bindings — the phones keep
+  # working and re-announce their clients, but every device shows as unclaimed
+  # until its owner claims it again.
+  - name: ai-browser-bridge-db
+    databaseName: ai_browser_bridge
+    user: ai_browser_bridge
+    plan: free
     region: frankfurt
-    dockerfilePath: ./crawl4ai/Dockerfile
-    dockerContext: ./crawl4ai
-    healthCheckPath: /health
-    numInstances: 1
-    envVars:
-      # Must match CRAWL4AI_API_TOKEN on the bridge service above.
-      - key: CRAWL4AI_API_TOKEN
-        generateValue: true
