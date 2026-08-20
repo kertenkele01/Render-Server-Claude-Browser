@@ -31,8 +31,15 @@ services:
           property: connectionString
 
       # Close signups once your own account exists. Leave unset (open) for the
-      # first deploy, then set to "false" in the dashboard.
+      # first deploy, then set to "false" in the dashboard. Users sign up from
+      # inside the Android app; this closes that door as well as the web one.
       - key: ALLOW_REGISTRATION
+        sync: false
+
+      # Comma-separated operator addresses. An account whose email is listed
+      # here gets the console at "/"; everyone else is a normal user whose whole
+      # experience is the app. Set this before creating your own account.
+      - key: ADMIN_EMAILS
         sync: false
 
       # Origins allowed to call the bridge from a browser and to open a

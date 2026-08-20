@@ -42,6 +42,13 @@ try {
 // ALLOW_REGISTRATION closes signups on a private deployment. Open by default so
 // a fresh install is usable; the first account is the operator's own.
 const ALLOW_REGISTRATION = !/^(0|false|no|off)$/i.test((process.env.ALLOW_REGISTRATION || 'true').trim());
+
+// Operator accounts, by email. Named in the environment rather than granted
+// through a UI so that promoting yourself is not something a signup can do.
+// Matching accounts get the console; everyone else is a normal user whose whole
+// experience lives in the Android app.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
+    .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 // MCP clients are not browsers, so no cross-origin access is required. Set
 // ALLOWED_ORIGINS only if you deliberately front the bridge with a web app.
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
@@ -1550,6 +1557,249 @@ app.all(['/mcp/tools/browser_get_tool_documentation', '/tools/browser_get_tool_d
 });
 
 // ----------------------------------------------------
+// APP API
+//
+// Everything a normal user does happens in the Android app: signing up, signing
+// in, changing a password, reading their own audit trail. Nobody is sent to a
+// website. The panel that remains is an operator console for whoever runs the
+// relay, not a place users are expected to visit.
+//
+// These endpoints authenticate with the **device** credential the phone already
+// holds — `Authorization: Bearer <deviceId>.<deviceSecret>` — not with an
+// account session. That is deliberate:
+//
+//   * the phone never has to store the account password or a session token,
+//     so a stolen backup does not hand over the account;
+//   * the device is already proving who it is on the WebSocket, so this reuses
+//     a secret that exists rather than inventing a second one;
+//   * and binding is implicit — the device that signs in *is* the device that
+//     gets bound, which removes the claim-code round trip entirely.
+//
+// The claim code still exists for the operator console's own use. It is no
+// longer on the user's path.
+// ----------------------------------------------------
+
+/** Verifies the phone's own credential. Returns the device record or null. */
+function requireDevice(req, res) {
+    const ip = limits.clientIp(req);
+    const raw = String(req.headers['authorization'] || '');
+    const value = raw.toLowerCase().startsWith('bearer ') ? raw.substring(7).trim() : raw.trim();
+    const cred = parseCredential(value);
+
+    const refuse = () => {
+        const gate = limits.hit('credential', ip);
+        if (!gate.allowed) {
+            res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+            res.status(429).json({ error: 'too_many_attempts', message: 'Çok fazla başarısız deneme.' });
+            return null;
+        }
+        res.status(401).json({
+            error: 'unauthorized',
+            message: 'Cihaz kimliği doğrulanamadı. Uygulama köprüye kayıtlı değil.'
+        });
+        return null;
+    };
+
+    if (!cred) return refuse();
+    const device = devices.get(cred.clientId);
+    if (!device) return refuse();
+    if (!safeEquals(sha256(cred.secret), device.secretHash)) return refuse();
+
+    limits.reset('credential', ip);
+    return device;
+}
+
+/** The account view the app renders. Never includes a hash or a secret. */
+async function accountSnapshot(device) {
+    const account = device.accountId ? await store.getAccountById(device.accountId) : null;
+    if (!account) {
+        return { linked: false, deviceId: device.id, deviceName: device.name };
+    }
+    const plan = limits.planFor(account);
+    const [usage, deviceCount, clientCount] = await Promise.all([
+        store.getUsage(account.id, limits.currentUsageWindow()),
+        store.countDevices(account.id),
+        store.countClients(account.id)
+    ]);
+    return {
+        linked: true,
+        deviceId: device.id,
+        deviceName: device.name,
+        email: account.email,
+        status: account.status,
+        plan: { id: account.plan, label: plan.label },
+        quota: {
+            commandsUsed: usage.commandCount,
+            commandsPerDay: plan.commandsPerDay,
+            maxDevices: plan.maxDevices,
+            auditRetentionDays: plan.auditRetentionDays
+        },
+        counts: { devices: deviceCount, clients: clientCount }
+    };
+}
+
+/** Attaches this device to an account, and its clients with it. */
+async function linkDeviceToAccount(device, account) {
+    await store.setDeviceAccount(device.id, account.id);
+    await refreshRegistryCache();
+    addLog(null, 'Uygulama', device.id, 'Cihaz Bağlandı', 'success', 'Cihaz hesaba bağlandı.');
+}
+
+app.post('/api/v1/register', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+
+    if (!ALLOW_REGISTRATION) {
+        return res.status(403).json({ error: 'registration_closed', message: 'Bu köprü yeni kayıtlara kapalı.' });
+    }
+
+    const gate = limits.hit('register', limits.clientIp(req));
+    if (!gate.allowed) {
+        res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+        return res.status(429).json({
+            error: 'too_many_attempts',
+            message: `Çok fazla kayıt denemesi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`
+        });
+    }
+
+    const email = accounts.normaliseEmail(req.body && req.body.email);
+    const password = String((req.body && req.body.password) || '');
+
+    const emailIssue = accounts.emailProblem(email);
+    if (emailIssue) return res.status(400).json({ error: 'invalid_email', message: emailIssue });
+    const passwordIssue = accounts.passwordProblem(password);
+    if (passwordIssue) return res.status(400).json({ error: 'weak_password', message: passwordIssue });
+
+    if (await store.getAccountByEmail(email)) {
+        return res.status(409).json({
+            error: 'email_taken',
+            message: 'Bu e-posta ile hesap oluşturulamadı. Zaten hesabınız varsa giriş yapın.'
+        });
+    }
+
+    const { passwordHash, passwordSalt } = await accounts.hashPassword(password);
+    let account = await store.createAccount({ email, passwordHash, passwordSalt });
+
+    // The operator's own accounts are named in the environment, so the first
+    // person to sign up on a fresh relay does not have to be promoted by hand
+    // — and nobody else can promote themselves by signing up.
+    if (ADMIN_EMAILS.includes(email)) {
+        account = await store.setAccountAdmin(account.id, true) || account;
+        console.log(`[Auth] Yönetici hesabı: ${email}`);
+    }
+
+    await linkDeviceToAccount(device, account);
+    console.log(`[Auth] Yeni hesap (uygulamadan): ${account.id}`);
+    res.status(201).json(await accountSnapshot(devices.get(device.id)));
+});
+
+app.post('/api/v1/login', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+
+    const email = accounts.normaliseEmail(req.body && req.body.email);
+    const password = String((req.body && req.body.password) || '');
+    const ip = limits.clientIp(req);
+
+    for (const key of [`e:${email}`, `i:${ip}`]) {
+        const gate = limits.hit('login', key);
+        if (!gate.allowed) {
+            res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+            return res.status(429).json({
+                error: 'too_many_attempts',
+                message: `Çok fazla giriş denemesi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`
+            });
+        }
+    }
+
+    const account = await store.getAccountByEmail(email);
+    const ok = account && await accounts.verifyPassword(password, account.passwordHash, account.passwordSalt);
+    if (!ok) {
+        return res.status(401).json({ error: 'bad_credentials', message: 'E-posta veya parola hatalı.' });
+    }
+    if (account.status !== 'active') {
+        return res.status(403).json({ error: 'account_suspended', message: 'Bu hesap askıya alınmış.' });
+    }
+
+    limits.reset('login', `e:${email}`);
+    limits.reset('login', `i:${ip}`);
+
+    // Signing in on a phone that is already somebody else's is a mistake worth
+    // refusing rather than silently resolving in either direction.
+    if (device.accountId && device.accountId !== account.id) {
+        return res.status(409).json({
+            error: 'device_linked_elsewhere',
+            message: 'Bu cihaz başka bir hesaba bağlı. Önce mevcut hesaptan çıkış yapın.'
+        });
+    }
+
+    const plan = limits.planFor(account);
+    if (!device.accountId) {
+        const owned = await store.countDevices(account.id);
+        if (owned >= plan.maxDevices) {
+            return res.status(409).json({
+                error: 'device_limit',
+                message: `${plan.label} planı ${plan.maxDevices} cihazla sınırlı. Başka bir cihazın bağını koparıp tekrar deneyin.`
+            });
+        }
+        await linkDeviceToAccount(device, account);
+    }
+
+    res.json(await accountSnapshot(devices.get(device.id)));
+});
+
+app.get('/api/v1/account', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    res.json(await accountSnapshot(device));
+});
+
+app.post('/api/v1/logout', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.json({ linked: false, deviceId: device.id });
+
+    await store.setDeviceAccount(device.id, null);
+    await refreshRegistryCache();
+    addLog(null, 'Uygulama', device.id, 'Cihaz Bağı Koparıldı', 'info', 'Kullanıcı uygulamadan çıkış yaptı.');
+    res.json({ linked: false, deviceId: device.id });
+});
+
+app.post('/api/v1/account/password', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) {
+        return res.status(403).json({ error: 'not_linked', message: 'Bu cihaz bir hesaba bağlı değil.' });
+    }
+
+    const account = await store.getAccountById(device.accountId);
+    const current = String((req.body && req.body.current) || '');
+    const next = String((req.body && req.body.next) || '');
+
+    const ok = account && await accounts.verifyPassword(current, account.passwordHash, account.passwordSalt);
+    if (!ok) return res.status(401).json({ error: 'bad_credentials', message: 'Mevcut parola hatalı.' });
+
+    const issue = accounts.passwordProblem(next);
+    if (issue) return res.status(400).json({ error: 'weak_password', message: issue });
+
+    const { passwordHash, passwordSalt } = await accounts.hashPassword(next);
+    await store.setAccountPassword(account.id, passwordHash, passwordSalt);
+    await store.revokeAccountSessions(account.id);
+    await refreshRegistryCache();
+    res.json({ status: 'ok', message: 'Parola değişti.' });
+});
+
+app.get('/api/v1/audit', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.json({ events: [] });
+
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 100, 1), 500);
+    const events = await store.listAudit(device.accountId, { limit });
+    res.json({ events });
+});
+
+// ----------------------------------------------------
 // CONTROL PANEL
 //
 // Server-rendered, session-gated, and scoped to one account everywhere. The
@@ -1670,6 +1920,10 @@ app.post('/auth/register', async (req, res) => {
 
     const { passwordHash, passwordSalt } = await accounts.hashPassword(password);
     const account = await store.createAccount({ email, passwordHash, passwordSalt });
+    if (ADMIN_EMAILS.includes(email)) {
+        await store.setAccountAdmin(account.id, true);
+        console.log(`[Auth] Yönetici hesabı: ${email}`);
+    }
     console.log(`[Auth] Yeni hesap: ${account.id}`);
     res.redirect(303, '/login?ok=1');
 });
@@ -1739,43 +1993,117 @@ app.post('/auth/logout', async (req, res) => {
 
 // --- overview ---
 
-app.get('/', async (req, res) => {
+/**
+ * Requires an operator. A normal account gets told, politely, that its home is
+ * the app — not a 403, because it is not an error for a user to have wandered
+ * here once.
+ */
+async function requireOperator(req, res) {
     const ctx = await requirePanelSession(req, res);
+    if (!ctx) return null;
+    if (!ctx.account.isAdmin) {
+        const csrf = ensureCsrfCookie(req, res, ctx.csrf);
+        panelHeaders(res);
+        res.status(200).send(panel.renderNotOperator({ email: ctx.account.email, csrf }));
+        return null;
+    }
+    return ctx;
+}
+
+app.get('/', async (req, res) => {
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
     const csrf = ensureCsrfCookie(req, res, ctx.csrf);
+    const window = limits.currentUsageWindow();
 
-    const [deviceList, clientList, usage] = await Promise.all([
+    const [totals, accountRows, ownDevices, ownClients] = await Promise.all([
+        store.aggregates(window),
+        store.listAccounts({ limit: 300 }),
         store.listDevices(ctx.account.id),
-        store.listClients(ctx.account.id),
-        store.getUsage(ctx.account.id, limits.currentUsageWindow())
+        store.listClients(ctx.account.id)
     ]);
-
-    const owned = new Set(deviceList.map((d) => d.id));
-    const openSessions = [...sseSessions.values()]
-        .filter((sess) => owned.has(sess.deviceId)).length;
-
-    const unclaimed = [...devices.values()].some((d) => !d.accountId && browsers.has(d.id));
+    const usageByAccount = await store.usageForAccounts(accountRows.map((a) => a.id), window);
 
     panelHeaders(res);
-    res.send(panel.renderOverview({
+    res.send(panel.renderOperatorOverview({
         account: ctx.account,
-        plan: limits.planFor(ctx.account),
-        devices: deviceList,
-        clients: clientList,
+        totals,
+        accountRows,
+        usageByAccount,
+        ownDevices,
+        ownClients,
         connectedDeviceIds: [...browsers.keys()],
-        openSessions,
-        usage,
+        openChannels: sseSessions.size,
         csrf,
+        registrationOpen: ALLOW_REGISTRATION,
         error: req.query.err ? String(req.query.err).substring(0, 200) : '',
         notice: req.query.ok ? String(req.query.ok).substring(0, 200) : '',
-        unclaimedHint: unclaimed && deviceList.length === 0,
         storeWarning: store.durable ? '' :
             'Bu röle kalıcı bir veritabanı olmadan çalışıyor (DATABASE_URL tanımlı değil). Hesaplar ve cihaz bağları bir sonraki dağıtımda kaybolabilir.'
     }));
 });
 
+/**
+ * Suspending an account.
+ *
+ * Takes effect on the next command, not the next pairing: `requireAuth` reads
+ * the cached account and refuses a suspended one, and open SSE channels for the
+ * account are closed here. Suspension that a running agent does not notice is
+ * not suspension.
+ */
+app.post('/admin/accounts/status', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
+
+    const accountId = String((req.body && req.body.accountId) || '').trim();
+    const status = String((req.body && req.body.status) || '').trim();
+    if (!['active', 'suspended'].includes(status)) {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Geçersiz durum.'));
+    }
+    if (accountId === ctx.account.id && status === 'suspended') {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Kendi hesabınızı askıya alamazsınız.'));
+    }
+
+    const updated = await store.setAccountStatus(accountId, status);
+    if (!updated) return res.redirect(303, '/?err=' + encodeURIComponent('Hesap bulunamadı.'));
+    await refreshRegistryCache();
+
+    if (status === 'suspended') {
+        sseSessions.forEach((sess, id) => {
+            if (sess.accountId === accountId) {
+                try { sess.res.end(); } catch (e) {}
+                sseSessions.delete(id);
+            }
+        });
+        await store.revokeAccountSessions(accountId);
+    }
+
+    console.log(`[Admin] ${updated.email} durumu: ${status}`);
+    res.redirect(303, '/?ok=' + encodeURIComponent(`${updated.email} → ${status}`));
+});
+
+app.post('/admin/accounts/plan', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
+
+    const accountId = String((req.body && req.body.accountId) || '').trim();
+    const plan = String((req.body && req.body.plan) || '').trim();
+    if (!Object.prototype.hasOwnProperty.call(limits.PLANS, plan)) {
+        return res.redirect(303, '/?err=' + encodeURIComponent('Geçersiz plan.'));
+    }
+
+    const updated = await store.setAccountPlan(accountId, plan);
+    if (!updated) return res.redirect(303, '/?err=' + encodeURIComponent('Hesap bulunamadı.'));
+    await refreshRegistryCache();
+
+    console.log(`[Admin] ${updated.email} planı: ${plan}`);
+    res.redirect(303, '/?ok=' + encodeURIComponent(`${updated.email} → ${plan}`));
+});
+
 app.post('/devices/claim', async (req, res) => {
-    const ctx = await requirePanelSession(req, res);
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
     if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
 
@@ -1818,7 +2146,7 @@ app.post('/devices/claim', async (req, res) => {
 });
 
 app.post('/devices/release', async (req, res) => {
-    const ctx = await requirePanelSession(req, res);
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
     if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
 
@@ -1841,7 +2169,7 @@ app.post('/devices/release', async (req, res) => {
 });
 
 app.post('/clients/revoke', async (req, res) => {
-    const ctx = await requirePanelSession(req, res);
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
     if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
 
@@ -1876,7 +2204,7 @@ app.post('/clients/revoke', async (req, res) => {
 // --- audit ---
 
 app.get('/audit', async (req, res) => {
-    const ctx = await requirePanelSession(req, res);
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
 
     const filters = {
@@ -1901,7 +2229,7 @@ app.get('/audit', async (req, res) => {
 });
 
 app.get('/audit/export', async (req, res) => {
-    const ctx = await requirePanelSession(req, res);
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
 
     const events = await store.listAudit(ctx.account.id, { limit: 5000 });
@@ -1923,7 +2251,7 @@ app.get('/audit/export', async (req, res) => {
 // --- account ---
 
 app.get('/account', async (req, res) => {
-    const ctx = await requirePanelSession(req, res);
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
     const csrf = ensureCsrfCookie(req, res, ctx.csrf);
     panelHeaders(res);
@@ -1938,7 +2266,7 @@ app.get('/account', async (req, res) => {
 });
 
 app.post('/account/password', async (req, res) => {
-    const ctx = await requirePanelSession(req, res);
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
     if (!csrfOk(req, ctx)) return res.redirect(303, '/account?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
 
@@ -1960,35 +2288,50 @@ app.post('/account/password', async (req, res) => {
 });
 
 app.post('/account/sessions/revoke', async (req, res) => {
-    const ctx = await requirePanelSession(req, res);
+    const ctx = await requireOperator(req, res);
     if (!ctx) return;
     if (!csrfOk(req, ctx)) return res.redirect(303, '/account?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
     const n = await store.revokeAccountSessions(ctx.account.id, ctx.session.idHash);
     res.redirect(303, '/account?ok=' + encodeURIComponent(`${n} oturum kapatıldı.`));
 });
 
-// A JSON view of the same, for anyone scripting against their own account.
+// The operator's JSON view. Same rule as the console: totals and per-account
+// metadata, never another account's audit trail.
 app.get('/api/status', async (req, res) => {
     const ctx = await currentSession(req);
     if (!ctx) return res.status(401).json({ error: 'unauthorized', message: 'Panel oturumu gerekli.' });
+    if (!ctx.account.isAdmin) {
+        return res.status(403).json({
+            error: 'not_operator',
+            message: 'Bu uç operatörler içindir. Hesabınızı Android uygulamasından yönetin.'
+        });
+    }
 
-    const [deviceList, clientList, usage] = await Promise.all([
-        store.listDevices(ctx.account.id),
-        store.listClients(ctx.account.id),
-        store.getUsage(ctx.account.id, limits.currentUsageWindow())
+    const window = limits.currentUsageWindow();
+    const [totals, accountRows] = await Promise.all([
+        store.aggregates(window),
+        store.listAccounts({ limit: 300 })
     ]);
-    const owned = new Set(deviceList.map((d) => d.id));
+    const usageByAccount = await store.usageForAccounts(accountRows.map((a) => a.id), window);
 
     res.json({
         status: 'running',
-        account: { email: ctx.account.email, plan: ctx.account.plan },
-        devices: deviceList.map((d) => ({
-            id: d.id, name: d.name, online: browsers.has(d.id), lastSeenAt: d.lastSeenAt
-        })),
-        clients: clientList.map((c) => ({ id: c.id, name: c.name, deviceId: c.deviceId })),
-        open_channels: [...sseSessions.values()].filter((sess) => owned.has(sess.deviceId)).length,
-        usage,
-        durable_store: store.durable
+        durable_store: store.durable,
+        registration_open: ALLOW_REGISTRATION,
+        totals,
+        connected_devices: browsers.size,
+        open_channels: sseSessions.size,
+        accounts: accountRows.map((a) => ({
+            id: a.id,
+            email: a.email,
+            plan: a.plan,
+            status: a.status,
+            is_admin: a.isAdmin,
+            devices: a.deviceCount,
+            clients: a.clientCount,
+            commands_today: usageByAccount.get(a.id) || 0,
+            created_at: a.createdAt
+        }))
     });
 });
 

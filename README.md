@@ -18,29 +18,52 @@ sürülememeli.
 
 ## Kontrol düzlemi
 
-`/` adresinde hesap tabanlı bir panel var. Her sorgu, giriş yapan hesabın kendi
-verisiyle sınırlıdır: bir hesap diğerinin cihazını, istemcisini veya denetim
-kaydını **hiçbir uçtan** göremez. Bunun testi yazılı.
+**Kullanıcı tarafı bu sunucuda değil, uygulamada.** Röle bir JSON API sunuyor,
+Android uygulaması onu kullanıyor; kullanıcı hiçbir web sayfasına
+yönlendirilmiyor.
 
-| Sayfa | Ne yapar |
+| Uç | Ne yapar |
 | --- | --- |
-| `/` | Cihazlar, AI istemcileri, kota, cihaz bağlama kodu girişi |
-| `/audit` | Denetim kaydı, cihaz/istemci süzgeci, CSV dışa aktarım |
-| `/account` | Parola değiştirme, diğer oturumları kapatma |
+| `POST /api/v1/register` | Hesap oluşturur ve çağıran cihazı bağlar |
+| `POST /api/v1/login` | Giriş yapar ve çağıran cihazı bağlar |
+| `POST /api/v1/logout` | Cihazın hesapla bağını koparır |
+| `GET /api/v1/account` | E-posta, plan, kota, cihaz/istemci sayısı |
+| `POST /api/v1/account/password` | Parola değiştirir |
+| `GET /api/v1/audit` | Hesabın denetim kaydı |
 
-Panel tamamen sunucuda render edilir ve **hiç JavaScript içermez**; sayfalar
-`script-src 'none'` ile gelir, çünkü ekranda gösterilen cihaz ve istemci adlarını
-başkaları yazmıştır.
+Bu uçlar hesap oturumuyla değil, telefonun zaten elinde olan
+`<deviceId>.<deviceSecret>` kimliğiyle doğrulanır. Uygulama hesap parolasını veya
+oturum çerezini hiç saklamaz, ve **bağlama örtüktür**: giriş yapan cihaz,
+bağlanan cihazdır.
+
+### Panel operatörler için
+
+`ADMIN_EMAILS` içinde adı geçen hesaplar `/` adresinde şunları görür: röle
+toplamları (hesap, cihaz, istemci, açık kanal, bugünkü komut, sahipsiz cihaz),
+hesap listesi ve hesap başına askıya alma / plan değiştirme.
+
+Normal bir hesap panele düşerse "her şey uygulamada" sayfasını görür — hata
+değil, yönlendirme.
+
+**Operatör başka bir hesabın denetim kaydını göremez.** Kullanıcı yönetmek için
+sayaç ve durum yeterli; hangi siteleri gezdikleri operatörün işi değil.
+`/audit` giriş yapan operatörün kendi hesabıyla sınırlıdır.
+
+Yönetici olmak ortam değişkeninden gelir, arayüzden değil: kendini terfi
+ettirmek bir kayıt işleminin yapabileceği bir şey olmamalı.
 
 Tek operatörlük `ADMIN_TOKEN` konsolu kaldırıldı. Tek bir paylaşılan token,
-rölendeki her cihazı ve her telefonun ziyaret ettiği host'ları listeliyordu;
-hesaplar gelince bu bir kolaylık değil, bir kiracının diğerinin gezinti
-geçmişini okuması demek.
+rölendeki her cihazı ve her telefonun ziyaret ettiği host'ları listeliyordu.
+
+Panel tamamen sunucuda render edilir ve **hiç JavaScript içermez**; sayfalar
+`script-src 'none'` ile gelir, çünkü ekranda gösterilen hesap ve cihaz adlarını
+başkaları yazmıştır.
 
 ### Cihaz bağlama
 
-Telefon, açık soketi üzerinden röleden 8 karakterlik, 10 dakikalık, tek
-kullanımlık bir kod ister; sahibi bu kodu panele girer ve cihaz hesaba geçer.
+Kullanıcı uygulamadan giriş yaptığında cihaz kendiliğinden bağlanır. Bağlama
+kodu mekanizması duruyor (telefon soketten ister, panele girilir) ama yalnızca
+operatörün kendi işi için.
 
 "İlk talep eden sahiplenir" kaydı kaldırıldı — o kural yalnızca kayıt defteri
 tek kişinin telefonuyken savunulabilirdi: durum dosyası kaybolduğunda her
@@ -86,11 +109,12 @@ telefon biliyor.
 1. Render Dashboard → **New → Blueprint** → bu depoyu seç.
 2. `render.yaml` bir web servisi ve bir PostgreSQL veritabanı tanımlar;
    `DATABASE_URL` otomatik bağlanır.
-3. Deploy bitince `/` adresine gidip ilk hesabı oluştur.
-4. Hesabın hazır olunca Environment sekmesinden `ALLOW_REGISTRATION=false` yapıp
-   kayıtları kapat.
-5. Android uygulamasında **Ayarlar → MCP** ekranına köprü adresini gir, bağlan,
-   ardından **Hesaba bağla** ile kod alıp panele gir.
+3. Environment sekmesinden `ADMIN_EMAILS` değerine kendi e-postanı yaz.
+4. `/` adresine gidip o e-postayla hesabı oluştur — konsolu yalnızca o hesap
+   görür.
+5. Kayıtları kapatmak istersen `ALLOW_REGISTRATION=false` yap.
+6. Kullanıcılar panele hiç uğramaz: uygulamayı kurar, **Ayarlar → MCP → Hesap**
+   bölümünden kaydolur ve cihazları kendiliğinden bağlanır.
 
 ### Dikkat: tek instance
 
@@ -126,8 +150,9 @@ npm test
 | `POST /message` | İstemci anahtarı | JSON-RPC araç çağrıları |
 | `POST /tools/*` | İstemci anahtarı | REST yedek uçları |
 | `GET /healthz` | Yok | Sağlık kontrolü |
-| `GET /`, `/audit`, `/account` | Panel oturumu | Kontrol paneli |
-| `GET /api/status` | Panel oturumu | Kendi hesabının cihaz/istemci/kotası |
+| `POST /api/v1/*` | Cihaz kimliği | Uygulama API'si (hesap, kota, kayıt) |
+| `GET /`, `/audit`, `/account` | Operatör oturumu | Operatör konsolu |
+| `GET /api/status` | Operatör oturumu | Röle toplamları ve hesap listesi |
 | WebSocket `/` | `deviceSecret` | Android cihaz bağlantısı |
 
 ## Kimlik doğrulama
