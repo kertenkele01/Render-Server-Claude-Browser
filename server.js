@@ -270,23 +270,27 @@ const TOOLS = [
     },
     {
         name: "browser_navigate",
-        description: "Android tarayıcısında belirtilen web adresine (URL) gider. Ayrıntılı kılavuz için 'browser_get_tool_documentation' aracını inceleyin.",
+        description: "Belirtilen adresi açar ve sayfa yerleştiğinde **ne bulduğunu** döner: yönlendirme sonrası gerçek adres, sayfa başlığı, başlık listesi ('headings'), link/form/giriş alanı sayıları ve sayfanın karakter uzunluğu. Bu özet, içeriği okumadan önce 'aradığım şey burada mı' sorusunu yanıtlamak içindir — gerekiyorsa 'browser_get_markdown' ile okuyun, ya da doğrudan tıklamaya/yazmaya geçin. İçeriği tek turda istiyorsanız 'read' parametresini true verin. Sayfa 6 saniyede yerleşmezse yanıt 'still_loading' durumuyla eldeki özeti döner; bu bir hata değildir.",
         inputSchema: {
             type: "object",
             properties: {
-                url: { type: "string", description: "Gidilecek URL (örn. https://www.google.com)" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel, tek cihaz varsa otomatik seçilir)" }
+                url: { type: "string", description: "Gidilecek tam adres (http veya https)" },
+                read: { type: "boolean", description: "true verilirse sayfanın Markdown içeriği de aynı yanıtta döner. Varsayılan false: çoğu gezinme bir ara adımdır ve içeriği boşuna taşımak hem yavaş hem pahalıdır." },
+                offset: { type: "integer", minimum: 0, description: "'read' true iken okunacak Markdown parçasının başlangıç karakteri." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             },
             required: ["url"]
         }
     },
     {
         name: "browser_search",
-        description: "Google'da belirtilen anahtar kelimelerle arama yapar ve arama sonuçları sayfasını yükler.",
+        description: "Google'da arama yapar ve sonuç sayfasının özetini döner: başlık, başlık listesi, link sayısı ve sayfa uzunluğu. Sonuçları okumak için 'browser_get_markdown' çağırın veya 'read' parametresini true verin.",
         inputSchema: {
             type: "object",
             properties: {
-                query: { type: "string", description: "Google'da aranacak kelime veya cümle (örn. 'en ucuz uçak bileti')" },
+                query: { type: "string", description: "Aranacak kelime veya cümle" },
+                read: { type: "boolean", description: "true verilirse sonuç sayfasının Markdown içeriği de aynı yanıtta döner." },
+                offset: { type: "integer", minimum: 0, description: "'read' true iken okunacak Markdown parçasının başlangıç karakteri." },
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             },
             required: ["query"]
@@ -430,6 +434,16 @@ const TOOLS = [
         }
     },
     {
+        name: "browser_list_shortcuts",
+        description: "Cihaz sahibinin kaydettiği kısayolları kategori kategori döner (ör. Genel, Haberler, Teknoloji, Alışveriş). Bu bir tavsiye veya sıralama değil, kullanıcının kendi başlangıç noktalarıdır — kullanıcıya aktarırken bunu belirtin. Sayfaya dokunmaz, izin gerektirmez ve devralınmış bir sekmede de çalışır.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            }
+        }
+    },
+    {
         name: "browser_get_session_info",
         description: "Mevcut tarayıcı oturumunun ve profilinin bilgilerini (Oturum ID, Güvenlik Token'ı, Çerez Durumu, İstemci Adı ve Sekme Sayısı) getirir.",
         inputSchema: {
@@ -485,7 +499,7 @@ const TOOL_DOCUMENTATION = {
     categories: {
         navigation: {
             name: "Sayfa Gezinme & Arama",
-            tools: ["browser_navigate", "browser_search", "browser_scroll"]
+            tools: ["browser_navigate", "browser_search", "browser_scroll", "browser_list_shortcuts"]
         },
         interaction: {
             name: "Etkileşim, Tıklama & Form Doldurma",
@@ -524,7 +538,7 @@ const TOOL_DOCUMENTATION = {
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
             example_call: { url: "https://www.google.com" },
-            best_practice: "Gezinti sonrası içerik okumak için 'browser_get_markdown' aracını çağırın."
+            best_practice: "Yanıt zaten sayfanın özetini taşır: gerçek adres, başlık, 'headings' listesi ve uzunluk. Önce ona bakın — aradığınız bölüm listede yoksa sayfayı hiç okumadan başka bir adrese geçebilirsiniz. Okumaya karar verirseniz 'browser_get_markdown' çağırın; içeriği kesin istiyorsanız baştan read=true verin ve bir turdan tasarruf edin."
         },
         browser_search: {
             name: "browser_search",
@@ -535,7 +549,7 @@ const TOOL_DOCUMENTATION = {
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
             example_call: { query: "İstanbul hava durumu" },
-            best_practice: "Google aramasından sonra arama sonuçlarındaki linkleri ve başlıkları okumak için 'browser_get_markdown' çağırın."
+            best_practice: "Arama yanıtındaki 'headings' listesi çoğu zaman sonuç başlıklarını verir; tam listeyi ve linkleri okumak için 'browser_get_markdown' çağırın veya read=true kullanın."
         },
         browser_get_markdown: {
             name: "browser_get_markdown",
@@ -619,11 +633,12 @@ const TOOL_DOCUMENTATION = {
         browser_new_tab: {
             name: "browser_new_tab",
             category: "tabs_and_sessions",
-            summary: "Mevcut AI oturumunda yeni bir tarayıcı sekmesi açar.",
+            summary: "Oturumunuzda yeni bir sekme açar. Oturumun ilk sekmesinde yanıt, cihaz sahibinin kısayol listesini de taşır.",
             parameters: {
-                url: "(Opsiyonel, String) Açılacak URL adresi (Varsayılan: google.com)"
+                url: "(Opsiyonel, String) Açılışta gidilecek adres.",
+                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            best_practice: "Mevcut sayfadaki çalışmanızı kaybetmeden yan bir araştırma veya işlem yapmak istediğinizde yeni sekme açın."
+            best_practice: "Yanıttaki 'shortcuts' alanı kullanıcının kendi başlangıç noktalarıdır — bir sıralama değil. Kullanıcının isteğine uyan biri varsa doğrudan açabilirsiniz; sonraki sekmelerde tam liste için 'browser_list_shortcuts' çağırın."
         },
         browser_close_tab: {
             name: "browser_close_tab",
@@ -646,6 +661,15 @@ const TOOL_DOCUMENTATION = {
             parameters: {
                 tabId: "(Zorunlu, String) Hedef sekme ID'si."
             }
+        },
+        browser_list_shortcuts: {
+            name: "browser_list_shortcuts",
+            category: "navigation",
+            summary: "Cihaz sahibinin kaydettiği kısayolları kategori kategori döner.",
+            parameters: {
+                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
+            },
+            best_practice: "Kullanıcı 'favorilerimden bak' dediğinde ya da nereden başlayacağınız belirsizken çağırın. Sonuçları kullanıcıya aktarırken bunların onun kendi listesi olduğunu söyleyin — tarafsız bir öneri değil."
         },
         browser_get_session_info: {
             name: "browser_get_session_info",
@@ -1342,6 +1366,7 @@ app.post('/message', async (req, res) => {
             case "browser_new_tab": actionType = "new_tab"; break;
             case "browser_close_tab": actionType = "close_tab"; break;
             case "browser_list_tabs": actionType = "list_tabs"; break;
+            case "browser_list_shortcuts": actionType = "list_shortcuts"; break;
             case "browser_switch_tab": actionType = "switch_tab"; break;
             case "browser_get_session_info": actionType = "get_session_info"; break;
             case "browser_list_sessions": actionType = "list_sessions"; break;
@@ -1516,6 +1541,9 @@ const fallbackRoutes = [
     { path: '/mcp/tools/browser_search', type: 'search' },
     { path: '/tools/browser_search', type: 'search' },
     
+    { path: '/mcp/tools/browser_list_shortcuts', type: 'list_shortcuts' },
+    { path: '/tools/browser_list_shortcuts', type: 'list_shortcuts' },
+
     { path: '/mcp/tools/browser_get_html', type: 'get_html' },
     { path: '/tools/browser_get_html', type: 'get_html' },
     

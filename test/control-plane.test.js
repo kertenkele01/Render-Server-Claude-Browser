@@ -432,6 +432,23 @@ test('askıya alınan hesabın anahtarları anında durur', async () => {
     device.close();
 });
 
+test('kısayol aracı röleden yönlendirilir', async () => {
+    const secret = 'kisayol-sirri-uzun-yeterince';
+    const device = await connectDevice('dev_kisayol', 'cihaz-sirri-16-karakter', [
+        { clientId: 'cli_kisayol', secret, name: 'Kısayol istemcisi' }
+    ]);
+    await appSignUp(device, 'kisayol@test.com', 'cok-guclu-parola-12');
+
+    const res = await fetch(`${BASE}/tools/browser_list_shortcuts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer cli_kisayol.${secret}` },
+        body: JSON.stringify({})
+    });
+    assert.equal(res.status, 200, 'kısayol aracı yönlendirilmedi');
+
+    device.close();
+});
+
 test('kimlik bilgisi sorgu dizesinden kabul edilmez', async () => {
     const res = await fetch(`${BASE}/tools/browser_get_markdown?token=cli_mcp_1.istemci-sirri-uzun-yeterince`);
     assert.equal(res.status, 401, 'sorgu dizesindeki anahtar kabul edildi');
