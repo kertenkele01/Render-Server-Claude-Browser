@@ -207,7 +207,7 @@ dökümünü çalışan tarayıcı kimlikleri yığınına çevirirdi.
 
 Akış:
 
-1. İstemci `/sse` ya da `/message`'a kimliksiz gelir, `401` ile birlikte
+1. Güncel istemci `/mcp`'ye kimliksiz gelir, `401` ile birlikte
    `WWW-Authenticate` içinde keşif belgesinin adresini alır.
 2. `/oauth/register` ile kendini kaydeder (genel istemci, PKCE zorunlu, istemci
    sırrı yok — kullanıcının kendi makinesinde çalışan bir program sır saklayamaz).
@@ -215,6 +215,15 @@ Akış:
    parola sormaz ve hiçbir yetki vermez.
 4. Kullanıcı telefondaki istemci kartından aldığı 8 karakterlik kodu yazar.
 5. `/oauth/token` PKCE doğrulamasından sonra jetonu döner.
+
+Kodlar röle belleğinde yaşar; deploy veya bağlantı kopması bunları bilerek
+geçersiz kılar. Android uygulaması bağlantı yenilenince ekrandaki eski kodu
+temizler ve yeni kod alınmasını ister. Böylece rölenin artık tanımadığı bir kod,
+yerel beş dakikalık sayaç bitene kadar kullanılabilir görünmez. Yeni istemci
+oluşturma da aynı anda ona ait izole oturum kabuğunu oluşturur; eski Android
+sürümlerinde anahtarı kaydedilip kartı görünmeyen istemciler uygulama açılışında
+anahtarları döndürülmeden onarılır. Bunlar cihaz tarafı davranışlarıdır; röle
+yalnızca kodun tek kullanımını ve ömrünü uygular.
 
 `scopes_supported` bilerek yok: bir istemcinin ne yapabileceğine karar veren
 izinler telefonda yaşıyor ve her komutta orada denetleniyor. Bir OAuth kapsamı
