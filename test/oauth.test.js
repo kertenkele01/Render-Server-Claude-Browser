@@ -316,6 +316,9 @@ test('telefondaki kodla tam akış çalışır ve jeton komut çalıştırır', 
     // that signs the user in on the web.
     assert.doesNotMatch(html, /type="password"/i, 'sayfada parola alanı olmamalı');
     assert.doesNotMatch(html, /name="(password|email)"/i, 'sayfa kimlik bilgisi toplamamalı');
+    assert.match(html, /maxlength="9"/, 'tireli telefon kodu alana bütünüyle sığmalı');
+    assert.match(html, /raw\.slice\(0, 4\) \+ '-' \+ raw\.slice\(4\)/,
+        'web alanı kodu telefonla aynı dört-artı-dört biçimine getirmeli');
 
     // 3. The user types the code. Lowercase and a stray hyphen on purpose:
     //    this is copied off one screen onto another by a human.
