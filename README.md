@@ -191,7 +191,9 @@ Röle bu kararların hiçbirini vermez, ama araç yanıtlarında karşılığın
 - **Anlık onay.** Oturum verisi silme, JavaScript çalıştırma ve kişisel bilgi
   alanlarını doldurma telefonda kullanıcı onayı ister; 30 saniyede yanıt yoksa
   reddedilir. Şifre ve ödeme alanları ayrı bir izne (`sensitive_fields`,
-  varsayılan kapalı) bağlıdır.
+  varsayılan kapalı) bağlıdır. `browser_fill_form` bütün bir formu **tek**
+  onayla sorar: art arda on onay kutusu, kullanıcının onayları okumayı
+  bırakmasına yol açar ve bu koruduğundan fazlasına mal olur.
 - **Devralma.** Kullanıcı bir sekmeyi devralırsa o sekmede okuma dahil hiçbir
   komut çalışmaz; ajanın `browser_new_tab` ile başka sekmeye geçmesi gerekir.
 - **Boş sekme.** Ana sayfaya dönmüş bir sekmede sayfa araçları, ne yapılması
@@ -212,6 +214,25 @@ paylaşan bir *etkileşim haritası* üretiyor; dış bir dönüştürücü bunu
 üstelik karşılığında giriş yapılmış sayfaların ham DOM'u üçüncü bir servise
 gidiyordu. Eski `browser_get_local_markdown` ve `browser_get_crawl4ai_markdown`
 adları geriye dönük uyumluluk için hâlâ kabul ediliyor.
+
+## Form araçları
+
+Röle bunları da yalnızca taşır, ama uçları ve şemaları burada tanımlı olduğu
+için sürümlerin uyuşması gerekir: cihazda olup röle şemasında olmayan bir araç
+istemciye hiç görünmez, tersi ise `Tool not found` döner.
+
+| Araç | Neden ayrı bir araç |
+| --- | --- |
+| `browser_select_option` | WebView'da bir `<select>`'e dokunmak Android'in kendi seçicisini açar. O pencere sistem arayüzüdür, sayfanın parçası değildir; ajan onu okuyamaz, oradan seçemez. Tıklama "başarılı" dönerken değer hiç değişmiyordu. |
+| `browser_pick_date` | Rezervasyon siteleri `input type=date` kullanmıyor; hücrelerinde yalnızca gün sayısı yazan bir ızgara çiziyorlar. Cihaz hücreyi ISO tarihe çözüyor ve gerekirse doğru aya kadar yürüyor. |
+| `browser_read_form` | Tek okuma aracı sayfanın tamamını 80k'lık pencerelerde döndürüyor; bir form sayfasında bunu her alandan sonra çağırmak karşılanamaz. Bu araç yalnızca alanları döner. |
+| `browser_fill_form` | Tek turda 30 alana kadar, tek onayla. |
+| `browser_handle_dialog` | `alert`/`confirm`/`prompt` sayfanın JS iş parçacığını bloke eder; açıkken hiçbir komut çalışamaz, dolayısıyla yanıt kutu açılmadan **önce** ayarlanır. |
+
+`test/tool-registry.test.js` bu uyumu kaynaktan doğruluyor: her araç şemasının
+bir komut karşılığı, bir REST yolu ve bir doküman kaydı olduğunu kontrol eder.
+Bir araç eklemek birbirinden habersiz dört yere dokunmak demek ve birini
+atlamanın bedeli, istemcinin aracı görüp çağırınca hata almasıdır.
 
 ## Deploy sonrası
 

@@ -405,6 +405,80 @@ const TOOLS = [
         }
     },
     {
+        name: "browser_select_option",
+        description: "Bir açılır listede (<select>) seçenek seçer. **Açılır listeler için 'browser_click' kullanmayın**: bir <select>'e tıklamak Android'in kendi seçicisini açar, o pencere sayfanın parçası değildir ve ajan oradan seçim yapamaz — tıklama başarılı görünür ama değer hiç değişmez. Bu araç seçimi doğrudan yapar ve sayfanın 'change' olayını görmesini sağlar. Seçeneğin görünen metnini 'label' ile verin; büyük/küçük harf ve Türkçe karakter farkı önemsizdir. Eşleşme bulunamazsa yanıt mevcut seçenekleri listeler. role=\"listbox\" ile kurulmuş özel menülerde de çalışır, ama önce menünün açık olması gerekir.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                selector: { type: "string", description: "Listenin element ID sayısı (markdown çıktısındaki 'Select #12') veya CSS seçici." },
+                label: { type: "string", description: "Seçilecek seçeneğin görünen metni, ör. 'Türkiye'." },
+                value: { type: "string", description: "(Opsiyonel) option etiketinin value değeri; 'label' yerine kullanılabilir." },
+                index: { type: "integer", description: "(Opsiyonel) Seçeneğin sıra numarası (0'dan başlar)." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            },
+            required: ["selector"]
+        }
+    },
+    {
+        name: "browser_pick_date",
+        description: "Bir tarih seçer — hem gerçek tarih alanlarında (input type=date) hem de rezervasyon ve uçuş sitelerinin çizdiği takvim bileşenlerinde. Tarihi her zaman YYYY-AA-GG biçiminde verin (ör. '2026-09-15'). Takvim hücrelerinin çoğu ekranda yalnızca gün sayısını gösterir; hangi aya ait olduğunu cihaz çözer, gerekirse ay oklarına basarak istenen aya kadar ilerler ve doğru hücreye tıklar. Takvim kapalıysa 'selector' olarak tarih alanının numarasını verin, önce o açılır. Gün doluysa/kapalıysa ya da tarih takvimin izin verdiği aralığın dışındaysa yanıt bunu ve görünen aralığı söyler — aynı çağrıyı tekrarlamak yardımcı olmaz.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                date: { type: "string", description: "Seçilecek tarih, YYYY-AA-GG biçiminde. Örn. '2026-09-15'." },
+                selector: { type: "string", description: "(Opsiyonel) Tarih alanının ya da takvimi açan öğenin element ID sayısı. Takvim zaten açıksa gerekmez." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            },
+            required: ["date"]
+        }
+    },
+    {
+        name: "browser_read_form",
+        description: "Bir formun **güncel durumunu** döner: her alanın numarası, etiketi, tipi, içindeki değer, zorunlu mu, devre dışı/salt okunur mu, açılır listelerin seçenekleri ve varsa doğrulama hataları. Ayrıca hangi zorunlu alanların hâlâ boş olduğunu ('missing_required'), hangilerinin geçersiz olduğunu ('invalid_fields') ve sayfanın gösterdiği uyarıları ('alerts') verir. Form doldururken her adımdan sonra tüm sayfayı 'browser_get_markdown' ile yeniden okumak yerine bunu kullanın: birkaç yüz token tutar ve tam olarak gereken bilgiyi verir. Şifre, kart ve doğrulama kodu alanlarının değerleri okunmaz; yalnızca dolu/boş bilgisi döner.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                selector: { type: "string", description: "(Opsiyonel) Formun ya da içindeki bir alanın element ID sayısı / CSS seçicisi. Boş bırakılırsa sayfadaki en kapsamlı görünür form seçilir." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            }
+        }
+    },
+    {
+        name: "browser_fill_form",
+        description: "Birden çok alanı tek komutta doldurur. Alan tipi otomatik anlaşılır: metin alanına yazar, açılır listede seçim yapar, onay kutusunu işaretler, gerçek tarih alanına tarihi yazar. Alan alan doldurmaya göre iki üstünlüğü var: tek tur sürer ve kişisel bilgi içeren bir formda kullanıcıya **tek bir onay** çıkar — arka arkaya on onay kutusu, kullanıcının onayları okumayı bırakmasına yol açar. Yanıt her alan için ayrı sonuç döner; doldurulamayanların nedeni 'results' içindedir. Şifre/ödeme alanları yine 'sensitive_fields' iznine bağlıdır. Takvim bileşenleri (gerçek input type=date olmayanlar) bu araçla doldurulamaz; onlar için 'browser_pick_date' kullanın.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                fields: {
+                    type: "array",
+                    description: "Doldurulacak alanlar; en fazla 30 tane.",
+                    items: {
+                        type: "object",
+                        properties: {
+                            selector: { type: "string", description: "Alanın element ID sayısı veya CSS seçicisi." },
+                            value: { type: "string", description: "Yazılacak değer. Açılır listede seçeneğin görünen metni, onay kutusunda 'true'/'false', tarih alanında YYYY-AA-GG." }
+                        },
+                        required: ["selector", "value"]
+                    }
+                },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            },
+            required: ["fields"]
+        }
+    },
+    {
+        name: "browser_handle_dialog",
+        description: "Sayfanın açacağı **bir sonraki** tarayıcı iletişim kutusunun (alert / confirm / prompt) nasıl yanıtlanacağını önceden belirler. Bu kutular sayfanın JavaScript'ini bloke eder: biri açıkken hiçbir komut çalışamaz ve hiçbir yanıt dönemez, bu yüzden karar kutu açılmadan verilir. Varsayılan davranış: 'alert' kabul edilir, 'confirm' ve 'prompt' reddedilir. Bir işlemin yanıtında 'dialog' alanını gördüyseniz ve farklı yanıtlamak istiyorsanız bu aracı çağırıp aynı işlemi tekrarlayın. Ayar 2 dakika ya da ilk kullanım kadar geçerlidir.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                accept: { type: "boolean", description: "true ise kutu kabul edilir (Tamam), false ise reddedilir (İptal). Varsayılan true." },
+                text: { type: "string", description: "(Opsiyonel) 'prompt' kutusuna yazılacak metin." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            }
+        }
+    },
+    {
         name: "browser_toggle_overlay",
         description: "Ekrandaki interaktif elementlerin üzerine Vimium-style görsel numaralandırma etiketleri (overlay) ekler veya kaldırır.",
         inputSchema: {
@@ -530,7 +604,7 @@ const TOOL_DOCUMENTATION = {
         },
         interaction: {
             name: "Etkileşim, Tıklama & Form Doldurma",
-            tools: ["browser_click", "browser_type", "browser_press_key", "browser_wait_for", "browser_toggle_overlay", "browser_execute_js"]
+            tools: ["browser_click", "browser_type", "browser_select_option", "browser_pick_date", "browser_read_form", "browser_fill_form", "browser_press_key", "browser_wait_for", "browser_handle_dialog", "browser_toggle_overlay", "browser_execute_js"]
         },
         content_extraction: {
             name: "İçerik Okuma",
@@ -608,6 +682,61 @@ const TOOL_DOCUMENTATION = {
             },
             best_practice: "Sayfanın yapısını anlamak için önce 'browser_get_markdown' kullanın — metin hem daha ucuz hem daha kesindir. Ekran görüntüsünü, yerleşimi görmeniz gereken durumlarda (bir öğe gerçekten görünüyor mu, bir grafik neye benziyor, tıklama doğru yere gitti mi) tercih edin. Yanıttaki 'full_page' alanı tam sayfa mı yoksa yalnızca görünen alan mı alındığını söyler; 'browser_toggle_overlay' ile birlikte kullanırsanız tıklanabilir öğelerin numaraları da görüntüde görünür.",
             limitations: "Uygulama ön planda değilken hiçbir sekme çizilmez ve 'blank_capture' döner; bu durumda içeriği metin olarak okuyun. Ekrana alma birkaç yüz milisaniye sürer ve kullanıcının ekranı o an kısaca değişir, bu yüzden döngü içinde çağırmayın. Aynı anda yalnızca bir ekrana alma yapılabilir. Tam sayfa yakalama yalnızca ekran dışı çizimde mümkündür; ekrana alınarak çekilen görüntülerde yalnızca görünen alan gelir. Görüntü 720 piksel genişliğe ölçeklenir ve JPEG olarak sıkıştırılır. Video, WebGL ve GPU ile birleştirilen bazı canvas içerikleri boş çıkabilir."
+        },
+        browser_select_option: {
+            name: "browser_select_option",
+            category: "interaction",
+            summary: "Açılır listede (<select>) seçenek seçer — tıklamayla yapılamayan tek işlem.",
+            parameters: {
+                selector: "(Zorunlu, String) Listenin element ID sayısı veya CSS seçici.",
+                label: "(String) Seçeneğin görünen metni. Büyük/küçük harf ve Türkçe karakter farkı önemsizdir.",
+                value: "(Opsiyonel, String) option değeri.",
+                index: "(Opsiyonel, Integer) Seçeneğin sırası, 0'dan başlar."
+            },
+            example_call: { selector: "12", label: "Türkiye" },
+            best_practice: "Bir <select>'e asla 'browser_click' göndermeyin: Android'in kendi seçicisi açılır, o pencere sayfanın parçası değildir ve seçim yapılamaz — tıklama başarılı görünürken değer değişmez. Seçenekleri markdown çıktısında liste satırında ya da 'browser_read_form' yanıtında görebilirsiniz. Özel (role=listbox) menülerde önce menüyü 'browser_click' ile açın."
+        },
+        browser_pick_date: {
+            name: "browser_pick_date",
+            category: "interaction",
+            summary: "Takvimden ya da tarih alanından bir tarih seçer; gerekirse doğru aya kendisi ilerler.",
+            parameters: {
+                date: "(Zorunlu, String) YYYY-AA-GG biçiminde tarih, ör. '2026-09-15'.",
+                selector: "(Opsiyonel, String) Tarih alanının ya da takvimi açan öğenin element ID sayısı."
+            },
+            example_call: { date: "2026-09-15", selector: "34" },
+            best_practice: "Rezervasyon sitelerinde takvim hücreleri ekranda yalnızca gün sayısını gösterir; hangi ay olduğunu tahmin etmeyin, bu aracı kullanın. Takvim kapalıysa 'selector' verin. Yanıt 'seçilemez' ya da 'aralık dışında' diyorsa tarih gerçekten yoktur — tekrar denemek yerine kullanıcıya durumu söyleyin."
+        },
+        browser_read_form: {
+            name: "browser_read_form",
+            category: "content_extraction",
+            summary: "Yalnızca formu okur: alanlar, değerler, zorunlular, seçenekler ve hatalar.",
+            parameters: {
+                selector: "(Opsiyonel, String) Formun ya da içindeki bir alanın element ID sayısı / CSS seçicisi."
+            },
+            example_call: {},
+            best_practice: "Form doldururken her adımdan sonra bunu çağırın, 'browser_get_markdown' değil: tüm sayfayı yeniden okumak bir rezervasyon sayfasında on binlerce token tutar ve pahalı olduğu için atlanır — atlanınca da form körlemesine doldurulur. 'missing_required' hangi alanların kaldığını, 'invalid_fields' sayfanın neye itiraz ettiğini söyler."
+        },
+        browser_fill_form: {
+            name: "browser_fill_form",
+            category: "interaction",
+            summary: "Birden çok alanı tek komutta, tek onayla doldurur.",
+            parameters: {
+                fields: "(Zorunlu, Array) [{selector, value}] listesi, en fazla 30 öğe. Alan tipi otomatik anlaşılır."
+            },
+            example_call: { fields: [{ selector: "5", value: "Ayşe" }, { selector: "6", value: "ayse@example.com" }, { selector: "9", value: "Türkiye" }] },
+            best_practice: "Kayıt ve rezervasyon formlarında varsayılan yol budur: tek tur, tek onay. Alan alan doldurmak hem yavaştır hem de kişisel bilgi alanlarında arka arkaya onay kutusu çıkarır. Şehir/havalimanı gibi öneri listesi açan alanlar istisnadır — onları 'browser_type' ile yazıp listeden seçin. Doldurduktan sonra göndermeden önce 'browser_read_form' ile doğrulayın."
+        },
+        browser_handle_dialog: {
+            name: "browser_handle_dialog",
+            category: "interaction",
+            summary: "Bir sonraki alert/confirm/prompt kutusunun yanıtını önceden ayarlar.",
+            parameters: {
+                accept: "(Opsiyonel, Boolean) true = kabul, false = reddet. Varsayılan true.",
+                text: "(Opsiyonel, String) 'prompt' kutusuna yazılacak metin."
+            },
+            example_call: { accept: true },
+            best_practice: "Kutu açıkken sayfanın JavaScript'i durur, dolayısıyla o anda hiçbir komut çalışmaz — bu yüzden karar önceden verilir. Varsayılan: 'alert' kabul, 'confirm'/'prompt' ret. Bir yanıtta 'dialog' alanı gördüyseniz ve sonucu değiştirmek istiyorsanız bu aracı çağırıp aynı işlemi tekrarlayın."
         },
         browser_toggle_overlay: {
             name: "browser_toggle_overlay",
@@ -744,12 +873,15 @@ const TOOL_DOCUMENTATION = {
             title: "Form ve rezervasyon sitelerinde çalışma",
             steps: [
                 "1. Sayfaya gidin; yanıttaki 'headings' ile doğru yerde olduğunuzu doğrulayın.",
-                "2. 'browser_get_markdown' çağırın — element numaraları bu geçişte atanır, öncesinde numarayla tıklayamazsınız.",
-                "3. Alanı 'browser_type' ile doldurun. Şehir/havalimanı gibi alanlarda yanıttaki 'suggestions' listesini bekleyin.",
-                "4. Listeden seçin: numarasıyla 'browser_click' veya 'browser_press_key' ile ArrowDown + Enter.",
-                "5. Tarih ve yolcu seçicileri özel bileşendir; 'browser_click' sonrası 'page_changed' false ise takvim açılmamıştır, sayfayı yeniden okuyup gerçek düğmeyi bulun.",
-                "6. Aramayı başlattıktan sonra 'browser_wait_for' ile sonuçların gelmesini bekleyin.",
-                "7. Her adımdan sonra 'page_changed' alanına bakın; false ise ilerlememişsinizdir ve aynı adımı tekrarlamak yardımcı olmaz."
+                "2. 'browser_get_markdown' çağırın — element numaraları bu geçişte atanır, öncesinde numarayla tıklayamazsınız. Bağlantılardaki fiil hangi aracı kullanacağınızı söyler: type: / select: / pick_date: / click:.",
+                "3. Formun tam durumunu 'browser_read_form' ile alın: zorunlu alanlar, açılır liste seçenekleri ve devre dışı alanlar buradadır. Bundan sonra her adımda tüm sayfayı değil bunu okuyun.",
+                "4. Sıradan alanları tek seferde doldurun: 'browser_fill_form' (tek tur, tek onay).",
+                "5. Açılır listeler için 'browser_select_option'. Bir <select>'e asla tıklamayın — Android'in kendi seçicisi açılır ve ajan oradan seçim yapamaz.",
+                "6. Tarihler için 'browser_pick_date' (YYYY-AA-GG). Takvim hücreleri ekranda sadece gün sayısı gösterir; ay tahmin etmeyin.",
+                "7. Şehir/havalimanı gibi öneri listesi açan alanlar istisnadır: 'browser_type' ile karakter karakter yazılır, sonra yanıttaki 'suggestions' listesinden numarayla 'browser_click' ya da 'browser_press_key' ile ArrowDown + Enter.",
+                "8. Göndermeden önce 'browser_read_form' ile doğrulayın: 'missing_required' boşsa form tamamdır.",
+                "9. Gönderdikten sonra yanıttaki 'invalid_fields' ve 'alerts' alanlarına bakın — sayfa formu neden kabul etmediğini orada söyler. 'page_changed' false ve bu alanlar boşsa ilerlememişsinizdir; aynı adımı tekrarlamak yardımcı olmaz.",
+                "10. Sonuçların yüklenmesini 'browser_wait_for' ile bekleyin. Bir onay kutusu ('dialog') çıktıysa 'browser_handle_dialog' ile yanıtı ayarlayıp adımı tekrarlayın."
             ]
         },
         {
@@ -1415,6 +1547,11 @@ app.post('/message', async (req, res) => {
             case "browser_scroll": actionType = "scroll"; break;
             case "browser_click": actionType = "click"; break;
             case "browser_type": actionType = "type"; break;
+            case "browser_select_option": actionType = "select_option"; break;
+            case "browser_pick_date": actionType = "pick_date"; break;
+            case "browser_read_form": actionType = "read_form"; break;
+            case "browser_fill_form": actionType = "fill_form"; break;
+            case "browser_handle_dialog": actionType = "handle_dialog"; break;
             case "browser_press_key": actionType = "press_key"; break;
             case "browser_wait_for": actionType = "wait_for"; break;
             case "browser_toggle_overlay": actionType = "toggle_overlay"; break;
@@ -1619,6 +1756,21 @@ const fallbackRoutes = [
     
     { path: '/mcp/tools/browser_type', type: 'type' },
     { path: '/tools/browser_type', type: 'type' },
+
+    { path: '/mcp/tools/browser_select_option', type: 'select_option' },
+    { path: '/tools/browser_select_option', type: 'select_option' },
+
+    { path: '/mcp/tools/browser_pick_date', type: 'pick_date' },
+    { path: '/tools/browser_pick_date', type: 'pick_date' },
+
+    { path: '/mcp/tools/browser_read_form', type: 'read_form' },
+    { path: '/tools/browser_read_form', type: 'read_form' },
+
+    { path: '/mcp/tools/browser_fill_form', type: 'fill_form' },
+    { path: '/tools/browser_fill_form', type: 'fill_form' },
+
+    { path: '/mcp/tools/browser_handle_dialog', type: 'handle_dialog' },
+    { path: '/tools/browser_handle_dialog', type: 'handle_dialog' },
 
     { path: '/mcp/tools/browser_press_key', type: 'press_key' },
     { path: '/tools/browser_press_key', type: 'press_key' },
