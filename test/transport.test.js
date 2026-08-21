@@ -200,7 +200,7 @@ test('kimliksiz POST /mcp OAuth sunucusunu işaret eder', async () => {
     assert.equal(res.status, 401, 'POST /mcp 404 dönüyor — istemci "bağlanamadı" der');
     assert.match(
         res.headers.get('www-authenticate') || '',
-        /resource_metadata="[^"]+\/\.well-known\/oauth-protected-resource"/
+        /resource_metadata="[^"]+\/\.well-known\/oauth-protected-resource\/mcp"/
     );
 });
 

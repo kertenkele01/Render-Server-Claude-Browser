@@ -1999,9 +1999,10 @@ function dropPairingsForDevice(deviceId) {
  */
 function setChallengeHeader(req, res) {
     const origin = oauth.originOf(req);
+    const suffix = req.path === '/mcp' ? '/mcp' : (req.path === '/sse' ? '/sse' : '');
     res.setHeader(
         'WWW-Authenticate',
-        `Bearer realm="mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource"`
+        `Bearer realm="mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource${suffix}"`
     );
 }
 
@@ -2017,7 +2018,10 @@ app.get([
     '/.well-known/oauth-protected-resource/mcp',
     '/.well-known/oauth-protected-resource/message'
 ], (req, res) => {
-    res.json(oauth.protectedResourceMetadata(oauth.originOf(req)));
+    const origin = oauth.originOf(req);
+    const suffix = req.path.endsWith('/mcp') ? '/mcp' :
+        (req.path.endsWith('/sse') ? '/sse' : (req.path.endsWith('/message') ? '/message' : ''));
+    res.json(oauth.protectedResourceMetadata(origin, suffix));
 });
 
 app.get([
@@ -2070,7 +2074,7 @@ app.post('/oauth/register', async (req, res) => {
  * here, because sending it to an unverified address is how open redirectors are
  * built).
  */
-async function readAuthorizeRequest(query) {
+async function readAuthorizeRequest(query, issuer) {
     const clientId = String(query.client_id || '');
     const redirectUri = String(query.redirect_uri || '');
     const state = query.state == null ? '' : String(query.state);
@@ -2082,7 +2086,11 @@ async function readAuthorizeRequest(query) {
     if (!clientId) return { fail: 'client_id eksik.' };
 
     let record = null;
-    try {
+    if (clientId.startsWith('https://')) {
+        const resolved = await oauth.resolveClientMetadata(clientId);
+        if (resolved.error) return { fail: resolved.error };
+        record = resolved.record;
+    } else try {
         record = await store.getOAuthClient(clientId);
     } catch (e) {
         return { fail: 'İstemci kaydı okunamadı.' };
@@ -2109,14 +2117,15 @@ async function readAuthorizeRequest(query) {
         return { redirect: { error: 'invalid_request', description: 'code_challenge_method yalnızca S256 olabilir.' }, redirectUri, state };
     }
 
-    return { ok: true, record, clientId, redirectUri, state, challenge, resource };
+    return { ok: true, record, clientId, redirectUri, state, challenge, resource, issuer };
 }
 
-function redirectWithError(res, redirectUri, state, error, description) {
+function redirectWithError(res, redirectUri, state, error, description, issuer) {
     const url = new URL(redirectUri);
     url.searchParams.set('error', error);
     if (description) url.searchParams.set('error_description', description);
     if (state) url.searchParams.set('state', state);
+    if (issuer) url.searchParams.set('iss', issuer);
     return res.redirect(302, url.toString());
 }
 
@@ -2133,7 +2142,7 @@ function authorizeHidden(parsed) {
 }
 
 app.get('/oauth/authorize', async (req, res) => {
-    const parsed = await readAuthorizeRequest(req.query || {});
+    const parsed = await readAuthorizeRequest(req.query || {}, oauth.originOf(req));
     if (parsed.fail) {
         return res.status(400).send(oauth.renderAuthorizePage({
             clientName: 'Bilinmeyen istemci',
@@ -2142,7 +2151,7 @@ app.get('/oauth/authorize', async (req, res) => {
         }));
     }
     if (parsed.redirect) {
-        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description);
+        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description, parsed.issuer);
     }
 
     res.setHeader('Cache-Control', 'no-store');
@@ -2159,7 +2168,7 @@ app.post('/oauth/authorize', async (req, res) => {
     // Every value still goes through readAuthorizeRequest: registered client,
     // exact redirect URI and PKCE are validated exactly as before.
     const submitted = { ...(req.query || {}), ...(req.body || {}) };
-    const parsed = await readAuthorizeRequest(submitted);
+    const parsed = await readAuthorizeRequest(submitted, oauth.originOf(req));
     if (parsed.fail) {
         return res.status(400).send(oauth.renderAuthorizePage({
             clientName: 'Bilinmeyen istemci',
@@ -2168,7 +2177,7 @@ app.post('/oauth/authorize', async (req, res) => {
         }));
     }
     if (parsed.redirect) {
-        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description);
+        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description, parsed.issuer);
     }
 
     const ip = limits.clientIp(req);
@@ -2237,6 +2246,7 @@ app.post('/oauth/authorize', async (req, res) => {
     const url = new URL(parsed.redirectUri);
     url.searchParams.set('code', authCode);
     if (parsed.state) url.searchParams.set('state', parsed.state);
+    url.searchParams.set('iss', parsed.issuer);
     return res.redirect(302, url.toString());
 });
 

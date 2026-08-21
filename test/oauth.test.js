@@ -23,6 +23,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const WebSocket = require('ws');
+const oauth = require('../lib/oauth');
 
 const ROOT = path.join(__dirname, '..');
 const PORT = 41801;
@@ -235,6 +236,8 @@ test('keşif belgeleri yayınlanıyor', async () => {
     assert.equal(meta.authorization_endpoint, `${BASE}/oauth/authorize`);
     assert.equal(meta.token_endpoint, `${BASE}/oauth/token`);
     assert.equal(meta.registration_endpoint, `${BASE}/oauth/register`);
+    assert.equal(meta.client_id_metadata_document_supported, true);
+    assert.equal(meta.authorization_response_iss_parameter_supported, true);
     assert.deepEqual(meta.code_challenge_methods_supported, ['S256']);
     assert.deepEqual(meta.token_endpoint_auth_methods_supported, ['none']);
 
@@ -242,6 +245,24 @@ test('keşif belgeleri yayınlanıyor', async () => {
     // OAuth scope could not affect any of them. Advertising one would promise a
     // control that does nothing.
     assert.equal(meta.scopes_supported, undefined, 'kapsam ilan edilmemeli');
+});
+
+test('CIMD belgesi kimliği ve yönlendirme adresini doğrular', () => {
+    const clientId = 'https://claude.ai/oauth/client-metadata.json';
+    const valid = oauth.validateClientMetadataDocument(clientId, {
+        client_id: clientId,
+        client_name: 'Claude',
+        redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
+        token_endpoint_auth_method: 'none'
+    });
+    assert.equal(valid.record.id, clientId);
+    assert.equal(valid.record.name, 'Claude');
+
+    assert.match(oauth.validateClientMetadataDocument(clientId, {
+        client_id: 'https://attacker.example/client.json',
+        client_name: 'Claude',
+        redirect_uris: ['https://claude.ai/api/mcp/auth_callback']
+    }).error, /client_id/i);
 });
 
 // --- registration ----------------------------------------------------------
