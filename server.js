@@ -3150,6 +3150,18 @@ async function sweepAudit() {
     } catch (e) {
         console.warn('[Audit] Temizlik başarısız:', e.message);
     }
+
+    // Dynamic registration lets any client create a record, and clients that
+    // register on every reinstall never clean up after themselves. A row here
+    // holds no secret, but an unbounded table is still a table nobody trimmed.
+    // Idle means idle: `lastUsedAt` is touched on every token exchange, so a
+    // connector somebody actually uses is never swept.
+    try {
+        const removed = await store.pruneOAuthClients(Date.now() - oauth.REGISTRATION_IDLE_MS);
+        if (removed > 0) console.log(`[OAuth] ${removed} kullanılmayan istemci kaydı silindi.`);
+    } catch (e) {
+        console.warn('[OAuth] Kayıt temizliği başarısız:', e.message);
+    }
 }
 
 async function main() {
