@@ -1,7 +1,7 @@
 const express = require('express');
 const { createServer } = require('http');
 const { WebSocketServer } = require('ws');
-const { randomUUID, createHash, timingSafeEqual, randomInt } = require('crypto');
+const { randomUUID, createHash, timingSafeEqual, randomInt, randomBytes } = require('crypto');
 
 const fs = require('fs');
 const path = require('path');
@@ -10,6 +10,7 @@ const { openStore } = require('./lib/store');
 const accounts = require('./lib/auth');
 const limits = require('./lib/limits');
 const panel = require('./lib/panel');
+const oauth = require('./lib/oauth');
 
 const app = express();
 app.disable('x-powered-by');
@@ -1019,9 +1020,14 @@ function requireAuth(req, res) {
             });
             return null;
         }
+        // Without this header a client has no way to discover that OAuth is
+        // an option here: it sees a bare 401 and gives up. With it, Claude Code
+        // and friends follow the pointer, register themselves and start the
+        // pairing flow on their own.
+        setChallengeHeader(req, res);
         res.status(401).json({
             error: 'unauthorized',
-            message: "Geçerli bir istemci kimliği gerekli. Android uygulamasında Ayarlar → MCP → 'AI istemcisi ekle' ile bir anahtar üretin ve verilen 'Authorization: Bearer <clientId>.<secret>' başlığını MCP yapılandırmanıza ekleyin."
+            message: "Geçerli bir istemci kimliği gerekli. İki yol var: (1) MCP istemciniz OAuth destekliyorsa bağlantıyı başlatın, tarayıcıda açılan sayfaya telefondaki bağlantı kodunu yazın; (2) ya da Android uygulamasında Ayarlar → MCP → 'AI istemcisi ekle' ile bir anahtar üretip 'Authorization: Bearer <clientId>.<secret>' başlığını elle ekleyin."
         });
         return null;
     }
@@ -1292,6 +1298,72 @@ wss.on('connection', (ws) => {
 
         // The phone asks for a claim code so its owner can attach it to an
         // account. This is the only thing an unclaimed device may do.
+        /*
+         * The phone offers a pairing code for one of its own clients.
+         *
+         * This is the only moment a plaintext client secret is held anywhere on
+         * the relay, and it is held in memory, for five minutes, for one use.
+         * The alternative — storing it so OAuth could hand it out later — would
+         * turn a dump of the relay's database into a pile of working browser
+         * credentials, which is exactly what this project has always refused.
+         *
+         * The code is generated *here* rather than on the phone so that two
+         * devices cannot mint the same one, and so the relay owns the clock.
+         */
+        if (payload.type === 'oauth_pairing_request') {
+            const cid = String(payload.clientId || '').trim();
+            const secret = String(payload.clientSecret || '');
+            const record = clients.get(cid);
+
+            // Verified against the registry, not taken on trust: a device may
+            // only offer codes for clients that are its own, and only with the
+            // secret that matches the hash it announced.
+            if (!record || record.deviceId !== deviceId || !safeEquals(sha256(secret), record.secretHash)) {
+                ws.send(JSON.stringify({
+                    type: 'oauth_pairing_code',
+                    status: 'rejected',
+                    clientId: cid,
+                    reason: 'Bu istemci bu cihaza ait değil ya da anahtar eşleşmiyor.'
+                }));
+                return;
+            }
+
+            const gate = limits.hit('pairing', deviceId);
+            if (!gate.allowed) {
+                ws.send(JSON.stringify({
+                    type: 'oauth_pairing_code',
+                    status: 'rate_limited',
+                    clientId: cid,
+                    retryAfterSeconds: gate.retryAfterSeconds
+                }));
+                return;
+            }
+
+            // One outstanding code per client: a second request replaces the
+            // first rather than leaving two doors open.
+            oauthPairings.dropWhere((p) => p.clientId === cid);
+
+            const code = oauth.newPairingCode();
+            const entry = oauthPairings.put(code, {
+                clientId: cid,
+                secret,
+                deviceId,
+                accountId: record.accountId || null,
+                clientName: record.name || 'AI istemcisi'
+            });
+
+            addLog(cid, record.name, deviceId, 'OAuth Kodu', 'info', 'Cihaz bir bağlantı kodu üretti.');
+            ws.send(JSON.stringify({
+                type: 'oauth_pairing_code',
+                status: 'ok',
+                clientId: cid,
+                code,
+                display: oauth.formatPairingCode(code),
+                expiresAt: entry.expiresAt
+            }));
+            return;
+        }
+
         if (payload.type === 'request_claim_code') {
             const device = devices.get(deviceId);
             if (device && device.accountId) {
@@ -1337,6 +1409,10 @@ wss.on('connection', (ws) => {
         clearTimeout(authDeadline);
         if (deviceId && browsers.get(deviceId) === ws) {
             browsers.delete(deviceId);
+            // An outstanding pairing code holds a plaintext secret and only
+            // makes sense while the phone that offered it is reachable. Dropping
+            // it here keeps that window as short as the session itself.
+            dropPairingsForDevice(deviceId);
             addLog(null, 'Android Uygulaması', deviceId, 'Cihaz Ayrıldı', 'info', 'Bağlantı kapandı.');
         }
     });
@@ -1789,6 +1865,379 @@ fallbackRoutes.forEach(route => {
     app.all(route.path, (req, res) => {
         directToolHandler(route.type, req, res);
     });
+});
+
+// ----------------------------------------------------
+// OAUTH 2.1
+//
+// What this does and does not do is worth stating once, because the shape is
+// unusual: **the token this server issues is the client credential the phone
+// already minted.** OAuth here is discovery and delivery, not a new trust
+// boundary. `authenticate()` is untouched — an OAuth-issued token and a
+// hand-pasted key are the same bytes.
+//
+// The plaintext secret exists on the relay only between the moment the phone
+// offers a pairing code and the moment the token endpoint answers, and only in
+// memory. Nothing new is written down. See lib/oauth.js.
+// ----------------------------------------------------
+
+/** code -> { clientId, secret, deviceId, accountId, clientName } */
+const oauthPairings = oauth.createEphemeralStore(oauth.PAIRING_TTL_MS);
+
+/** code -> { oauthClientId, redirectUri, codeChallenge, clientId, secret, resource } */
+const oauthAuthCodes = oauth.createEphemeralStore(oauth.AUTH_CODE_TTL_MS, 15 * 1000);
+
+/**
+ * A pairing offer only makes sense while the phone that made it is reachable.
+ * Dropping them on disconnect also means a code cannot outlive the session it
+ * was created in, which is the shortest honest lifetime for something holding a
+ * plaintext secret.
+ */
+function dropPairingsForDevice(deviceId) {
+    return oauthPairings.dropWhere((p) => p.deviceId === deviceId);
+}
+
+/**
+ * RFC 9728 §5.1 — the pointer a client follows after a 401.
+ *
+ * Sent on every unauthenticated MCP response, because a client that gets a bare
+ * 401 has no way to learn that OAuth is even an option here and will simply
+ * fail with "unauthorized".
+ */
+function setChallengeHeader(req, res) {
+    const origin = oauth.originOf(req);
+    res.setHeader(
+        'WWW-Authenticate',
+        `Bearer realm="mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource"`
+    );
+}
+
+// --- discovery -------------------------------------------------------------
+//
+// The path-suffixed forms exist because a client whose MCP endpoint is
+// `/sse` looks for `/.well-known/oauth-protected-resource/sse` first, per
+// RFC 9728 §3.1. Answering both costs one line and saves a failed discovery.
+
+app.get([
+    '/.well-known/oauth-protected-resource',
+    '/.well-known/oauth-protected-resource/sse',
+    '/.well-known/oauth-protected-resource/message'
+], (req, res) => {
+    res.json(oauth.protectedResourceMetadata(oauth.originOf(req)));
+});
+
+app.get([
+    '/.well-known/oauth-authorization-server',
+    '/.well-known/oauth-authorization-server/sse',
+    '/.well-known/oauth-authorization-server/message'
+], (req, res) => {
+    res.json(oauth.authorizationServerMetadata(oauth.originOf(req)));
+});
+
+// --- dynamic client registration (RFC 7591) --------------------------------
+
+app.post('/oauth/register', async (req, res) => {
+    const ip = limits.clientIp(req);
+    const gate = limits.hit('register', ip);
+    if (!gate.allowed) {
+        res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+        return res.status(429).json({
+            error: 'temporarily_unavailable',
+            error_description: `Çok fazla kayıt denemesi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`
+        });
+    }
+
+    const outcome = oauth.validateRegistration(req.body || {});
+    if (outcome.error) {
+        return res.status(400).json({ error: outcome.error, error_description: outcome.message });
+    }
+
+    try {
+        await store.createOAuthClient(outcome.record);
+    } catch (e) {
+        console.error('[OAuth] Registration could not be stored:', e.message);
+        return res.status(500).json({
+            error: 'server_error',
+            error_description: 'Kayıt saklanamadı.'
+        });
+    }
+
+    addLog(null, outcome.record.name, null, 'OAuth İstemci Kaydı', 'info', 'Yeni bir MCP istemcisi kendini kaydetti.');
+    return res.status(201).json(oauth.registrationResponse(outcome.record));
+});
+
+// --- authorization ---------------------------------------------------------
+
+/**
+ * Reads and checks everything that must be right before a person is shown
+ * anything. Returns either a `redirect` (a protocol error the client should be
+ * told about at its own callback) or a `fail` (an error that must be rendered
+ * here, because sending it to an unverified address is how open redirectors are
+ * built).
+ */
+async function readAuthorizeRequest(query) {
+    const clientId = String(query.client_id || '');
+    const redirectUri = String(query.redirect_uri || '');
+    const state = query.state == null ? '' : String(query.state);
+    const challenge = String(query.code_challenge || '');
+    const method = String(query.code_challenge_method || '');
+    const responseType = String(query.response_type || '');
+    const resource = query.resource == null ? '' : String(query.resource);
+
+    if (!clientId) return { fail: 'client_id eksik.' };
+
+    let record = null;
+    try {
+        record = await store.getOAuthClient(clientId);
+    } catch (e) {
+        return { fail: 'İstemci kaydı okunamadı.' };
+    }
+    if (!record) {
+        return { fail: 'Bu client_id kayıtlı değil. İstemcinin yeniden kayıt olması gerekiyor.' };
+    }
+
+    if (!redirectUri) return { fail: 'redirect_uri eksik.' };
+    const allowed = record.redirectUris.some((uri) => oauth.redirectMatches(uri, redirectUri));
+    if (!allowed) {
+        // Never redirect to prove a redirect is wrong.
+        return { fail: 'redirect_uri bu istemci için kayıtlı adreslerle eşleşmiyor.' };
+    }
+
+    // From here on the address is verified, so protocol errors can go home.
+    if (responseType !== 'code') {
+        return { redirect: { error: 'unsupported_response_type', description: 'Yalnızca response_type=code destekleniyor.' }, redirectUri, state };
+    }
+    if (!challenge) {
+        return { redirect: { error: 'invalid_request', description: 'code_challenge zorunlu: bu sunucu PKCE olmadan yetkilendirme yapmaz.' }, redirectUri, state };
+    }
+    if (method && method !== 'S256') {
+        return { redirect: { error: 'invalid_request', description: 'code_challenge_method yalnızca S256 olabilir.' }, redirectUri, state };
+    }
+
+    return { ok: true, record, clientId, redirectUri, state, challenge, resource };
+}
+
+function redirectWithError(res, redirectUri, state, error, description) {
+    const url = new URL(redirectUri);
+    url.searchParams.set('error', error);
+    if (description) url.searchParams.set('error_description', description);
+    if (state) url.searchParams.set('state', state);
+    return res.redirect(302, url.toString());
+}
+
+function authorizeHidden(parsed) {
+    return {
+        client_id: parsed.clientId,
+        redirect_uri: parsed.redirectUri,
+        state: parsed.state,
+        code_challenge: parsed.challenge,
+        code_challenge_method: 'S256',
+        response_type: 'code',
+        resource: parsed.resource
+    };
+}
+
+app.get('/oauth/authorize', async (req, res) => {
+    const parsed = await readAuthorizeRequest(req.query || {});
+    if (parsed.fail) {
+        return res.status(400).send(oauth.renderAuthorizePage({
+            clientName: 'Bilinmeyen istemci',
+            hidden: {},
+            error: parsed.fail
+        }));
+    }
+    if (parsed.redirect) {
+        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description);
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(oauth.renderAuthorizePage({
+        clientName: parsed.record.name,
+        hidden: authorizeHidden(parsed)
+    }));
+});
+
+app.post('/oauth/authorize', async (req, res) => {
+    const parsed = await readAuthorizeRequest(req.body || {});
+    if (parsed.fail) {
+        return res.status(400).send(oauth.renderAuthorizePage({
+            clientName: 'Bilinmeyen istemci',
+            hidden: {},
+            error: parsed.fail
+        }));
+    }
+    if (parsed.redirect) {
+        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description);
+    }
+
+    const ip = limits.clientIp(req);
+    const gate = limits.hit('pairing', ip);
+    if (!gate.allowed) {
+        res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+        return res.status(429).send(oauth.renderAuthorizePage({
+            clientName: parsed.record.name,
+            hidden: authorizeHidden(parsed),
+            error: `Çok fazla hatalı kod denendi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`
+        }));
+    }
+
+    const code = oauth.normalisePairingCode((req.body || {}).code);
+    if (!oauth.isWellFormedCode(code)) {
+        return res.status(400).send(oauth.renderAuthorizePage({
+            clientName: parsed.record.name,
+            hidden: authorizeHidden(parsed),
+            error: 'Kod 8 karakter olmalı. Telefondaki kodu olduğu gibi yazın; büyük/küçük harf ve tire fark etmez.'
+        }));
+    }
+
+    // Single-use: `take` removes it whether or not the rest succeeds, so a code
+    // cannot be tried twice with two different clients.
+    const pairing = oauthPairings.take(code);
+    if (!pairing) {
+        return res.status(400).send(oauth.renderAuthorizePage({
+            clientName: parsed.record.name,
+            hidden: authorizeHidden(parsed),
+            error: 'Kod geçersiz ya da süresi dolmuş. Telefondan yeni bir kod alın — kodlar 5 dakika geçerlidir ve bir kez kullanılır.'
+        }));
+    }
+
+    // The client may have been revoked between the phone offering the code and
+    // the user typing it.
+    const stillValid = clients.get(pairing.clientId);
+    if (!stillValid || !safeEquals(sha256(pairing.secret), stillValid.secretHash)) {
+        return res.status(400).send(oauth.renderAuthorizePage({
+            clientName: parsed.record.name,
+            hidden: authorizeHidden(parsed),
+            error: 'Bu kodun bağlı olduğu erişim anahtarı artık geçerli değil. Telefondan yeni bir kod alın.'
+        }));
+    }
+
+    limits.reset('pairing', ip);
+
+    const authCode = oauth.base64url(randomBytes(32));
+    oauthAuthCodes.put(authCode, {
+        oauthClientId: parsed.clientId,
+        redirectUri: parsed.redirectUri,
+        codeChallenge: parsed.challenge,
+        clientId: pairing.clientId,
+        secret: pairing.secret,
+        resource: parsed.resource
+    });
+
+    addLog(
+        pairing.clientId,
+        pairing.clientName,
+        pairing.deviceId,
+        'OAuth Yetkilendirme',
+        'success',
+        `${parsed.record.name} eşleştirme kodunu kullandı.`
+    );
+
+    const url = new URL(parsed.redirectUri);
+    url.searchParams.set('code', authCode);
+    if (parsed.state) url.searchParams.set('state', parsed.state);
+    return res.redirect(302, url.toString());
+});
+
+// --- token -----------------------------------------------------------------
+
+app.post('/oauth/token', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const body = req.body || {};
+
+    if (String(body.grant_type || '') !== 'authorization_code') {
+        return res.status(400).json({
+            error: 'unsupported_grant_type',
+            error_description: 'Yalnızca authorization_code destekleniyor. Bu röle yenileme jetonu vermez çünkü verdiği erişim jetonu süresizdir; iptal telefondan ya da /oauth/revoke ile yapılır.'
+        });
+    }
+
+    const grant = oauthAuthCodes.take(String(body.code || ''));
+    if (!grant) {
+        return res.status(400).json({
+            error: 'invalid_grant',
+            error_description: 'Yetkilendirme kodu geçersiz, kullanılmış ya da süresi dolmuş.'
+        });
+    }
+
+    if (String(body.client_id || '') !== grant.oauthClientId) {
+        return res.status(400).json({
+            error: 'invalid_grant',
+            error_description: 'Kod başka bir istemci için verilmiş.'
+        });
+    }
+
+    // Exact match here, not the loopback-tolerant one: at this point the client
+    // is echoing back the address it was actually redirected to.
+    if (String(body.redirect_uri || '') !== grant.redirectUri) {
+        return res.status(400).json({
+            error: 'invalid_grant',
+            error_description: 'redirect_uri yetkilendirme isteğindekiyle aynı olmalı.'
+        });
+    }
+
+    if (!oauth.verifyPkce(body.code_verifier, grant.codeChallenge, 'S256')) {
+        return res.status(400).json({
+            error: 'invalid_grant',
+            error_description: 'code_verifier, code_challenge ile eşleşmiyor.'
+        });
+    }
+
+    const record = clients.get(grant.clientId);
+    if (!record || !safeEquals(sha256(grant.secret), record.secretHash)) {
+        return res.status(400).json({
+            error: 'invalid_grant',
+            error_description: 'Bu koda bağlı erişim anahtarı artık geçerli değil.'
+        });
+    }
+
+    try { await store.touchOAuthClient(grant.oauthClientId, Date.now()); } catch (e) { /* not worth failing a login over */ }
+
+    // The token *is* the credential. There is nothing else it could be without
+    // the relay storing a second secret at rest, which is the thing this design
+    // exists to avoid. It does not expire, so no `expires_in` is claimed and no
+    // refresh token is issued; a client that wants one told the truth about it
+    // is better served by the absence of the field than by a lie.
+    return res.json({
+        access_token: `${grant.clientId}.${grant.secret}`,
+        token_type: 'Bearer'
+    });
+});
+
+// --- revocation (RFC 7009) -------------------------------------------------
+
+app.post('/oauth/revoke', async (req, res) => {
+    // RFC 7009 §2.2: an unknown token is a success. Saying "that token does not
+    // exist" would turn this endpoint into an oracle for guessing tokens.
+    res.setHeader('Cache-Control', 'no-store');
+
+    const token = String((req.body || {}).token || '');
+    const dot = token.indexOf('.');
+    if (dot <= 0) return res.status(200).end();
+
+    const clientId = token.slice(0, dot);
+    const secret = token.slice(dot + 1);
+    const record = clients.get(clientId);
+    if (!record || !safeEquals(sha256(secret), record.secretHash)) return res.status(200).end();
+
+    try {
+        await store.deleteClient(clientId);
+        clients.delete(clientId);
+    } catch (e) {
+        console.error('[OAuth] Revocation failed:', e.message);
+        return res.status(200).end();
+    }
+
+    // Fail-closed either way, but tell the phone so its client list does not
+    // disagree with what the relay will honour.
+    const socket = browsers.get(record.deviceId);
+    if (socket && socket.readyState === 1) {
+        try { socket.send(JSON.stringify({ type: 'client_revoked', clientId })); } catch (e) {}
+    }
+    dropPairingsForDevice(record.deviceId);
+
+    addLog(clientId, record.name, record.deviceId, 'OAuth İptal', 'info', 'İstemci kendi erişimini iptal etti.');
+    return res.status(200).end();
 });
 
 // REST Documentation / Skills Endpoint

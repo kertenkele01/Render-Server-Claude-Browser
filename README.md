@@ -150,10 +150,57 @@ npm test
 | `POST /message` | İstemci anahtarı | JSON-RPC araç çağrıları |
 | `POST /tools/*` | İstemci anahtarı | REST yedek uçları |
 | `GET /healthz` | Yok | Sağlık kontrolü |
+| `GET /.well-known/oauth-protected-resource` | Yok | Kaynak keşif belgesi (RFC 9728) |
+| `GET /.well-known/oauth-authorization-server` | Yok | Sunucu keşif belgesi (RFC 8414) |
+| `POST /oauth/register` | Yok | Dinamik istemci kaydı (RFC 7591) |
+| `GET/POST /oauth/authorize` | Eşleştirme kodu | Kodun girildiği tek sayfa |
+| `POST /oauth/token` | PKCE | Kodu erişim jetonuna çevirir |
+| `POST /oauth/revoke` | Jetonun kendisi | Erişimi gerçekten kaldırır (RFC 7009) |
 | `POST /api/v1/*` | Cihaz kimliği | Uygulama API'si (hesap, kota, kayıt) |
 | `GET /`, `/audit`, `/account` | Operatör oturumu | Operatör konsolu |
 | `GET /api/status` | Operatör oturumu | Röle toplamları ve hesap listesi |
 | WebSocket `/` | `deviceSecret` | Android cihaz bağlantısı |
+
+## OAuth
+
+MCP istemcileri artık bir insanın anahtarı yapıştırmasını beklemiyor. Röle bu
+yüzden hem kaynak sunucusu hem de OAuth 2.1 yetkilendirme sunucusu — ama önemli
+olan, bu rolde **hiçbir şey üretmiyor** olması.
+
+**Verilen erişim jetonu, telefonun zaten ürettiği kimliğin kendisi:**
+`<clientId>.<secret>`. Kullanıcının eskiden elle kopyaladığı dizginin aynısı.
+Dolayısıyla `authenticate()` hiç değişmedi, röle yeni hiçbir sır saklamıyor
+(hâlâ yalnızca `sha256(secret)`), ve rölenin ele geçirilmesi öncekinden
+fazlasını kazandırmıyor: rölenin, telefonun kabul edeceği bir kimlik
+üretebileceği bir yol yok, çünkü `secretHash`'i yalnızca telefon duyurabiliyor.
+
+Düz metin sır rölede tek bir pencerede bulunuyor — telefonun kodu sunması ile
+jeton ucunun cevap vermesi arasında. Bellekte, tek kullanımlık, beş dakika; cihaz
+bağlantısı koptuğunda düşüyor. Diske hiç yazılmıyor. Saklamak, veritabanının bir
+dökümünü çalışan tarayıcı kimlikleri yığınına çevirirdi.
+
+Akış:
+
+1. İstemci `/sse` ya da `/message`'a kimliksiz gelir, `401` ile birlikte
+   `WWW-Authenticate` içinde keşif belgesinin adresini alır.
+2. `/oauth/register` ile kendini kaydeder (genel istemci, PKCE zorunlu, istemci
+   sırrı yok — kullanıcının kendi makinesinde çalışan bir program sır saklayamaz).
+3. Tarayıcıda `/oauth/authorize` açılır. Sayfanın tamamı tek bir kod alanıdır;
+   parola sormaz ve hiçbir yetki vermez.
+4. Kullanıcı telefondaki istemci kartından aldığı 8 karakterlik kodu yazar.
+5. `/oauth/token` PKCE doğrulamasından sonra jetonu döner.
+
+`scopes_supported` bilerek yok: bir istemcinin ne yapabileceğine karar veren
+izinler telefonda yaşıyor ve her komutta orada denetleniyor. Bir OAuth kapsamı
+bunların hiçbirini etkileyemezdi ve hiçbir şeyi korumayan bir denetim, hiç
+denetim olmamasından kötüdür.
+
+`expires_in` ve yenileme jetonu da yok — jeton süresiz, çünkü kimlik süresiz.
+Buna karşılık iptal gerçek: `/oauth/revoke` istemciyi defterden siler, anahtar
+yönlendirmeyi bırakır ve telefona haber gider.
+
+`test/oauth.test.js` akışı uçtan uca sürüyor. En çok savunulan iddia sondaki:
+verilen jeton telefonun ürettiği kimliğin ta kendisi.
 
 ## Kimlik doğrulama
 
@@ -165,8 +212,9 @@ npm test
 
 Bu ayrım, röle ele geçirilse bile kimsenin adına gezilememesinin sebebi.
 
-MCP istemcileri `Authorization: Bearer <clientId>.<secret>` gönderir. Bu değeri
-**telefon** üretir: kullanıcı uygulamada *Ayarlar → Oturumlar → AI istemcisi
+MCP istemcileri `Authorization: Bearer <clientId>.<secret>` gönderir. Bu değere
+iki yoldan ulaşılır — yukarıdaki OAuth akışıyla, ya da elle kopyalanarak — ve
+ikisi de aynı dizgiyi verir. Değeri her hâlükârda **telefon** üretir: kullanıcı uygulamada *Ayarlar → Oturumlar → AI istemcisi
 ekle* der, cihaz anahtarı oluşturur ve gösterir, kullanıcı kopyalayıp MCP
 yapılandırmasına yapıştırır. Anahtar kalıcıdır ve istemci kartından istenildiği
 zaman tekrar kopyalanabilir; sızma şüphesinde aynı karttan yenilenir (kimlik,
