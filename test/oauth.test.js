@@ -137,9 +137,10 @@ async function pairingCodeFor(device, clientId, secret) {
     return device.next('oauth_pairing_code');
 }
 
-/** Posts the pairing form exactly as the browser would. */
-function submitAuthorize(fields) {
-    return fetch(`${BASE}/oauth/authorize`, {
+/** Posts the pairing form. queryFields models hosted browsers that drop hidden inputs. */
+function submitAuthorize(fields, queryFields = null) {
+    const query = queryFields ? `?${new URLSearchParams(queryFields)}` : '';
+    return fetch(`${BASE}/oauth/authorize${query}`, {
         method: 'POST',
         redirect: 'manual',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -316,22 +317,30 @@ test('telefondaki kodla tam akış çalışır ve jeton komut çalıştırır', 
     // that signs the user in on the web.
     assert.doesNotMatch(html, /type="password"/i, 'sayfada parola alanı olmamalı');
     assert.doesNotMatch(html, /name="(password|email)"/i, 'sayfa kimlik bilgisi toplamamalı');
+    assert.match(html, new RegExp(`action="/oauth/authorize\\?[^\"]*client_id=${registered.body.client_id}`),
+        'hosted tarayıcı gizli alanları atsa bile form hedefi client_id taşımalı');
     assert.match(html, /maxlength="9"/, 'tireli telefon kodu alana bütünüyle sığmalı');
     assert.match(html, /raw\.slice\(0, 4\) \+ '-' \+ raw\.slice\(4\)/,
         'web alanı kodu telefonla aynı dört-artı-dört biçimine getirmeli');
 
     // 3. The user types the code. Lowercase and a stray hyphen on purpose:
     //    this is copied off one screen onto another by a human.
-    const submitted = await submitAuthorize({
+    const authorizationContext = {
         response_type: 'code',
         client_id: registered.body.client_id,
         redirect_uri: 'http://127.0.0.1:9876/callback',
         code_challenge: pkce.challenge,
         code_challenge_method: 'S256',
         state: 'durum-123',
-        resource: BASE,
-        code: offer.display.toLowerCase()
-    });
+        resource: BASE
+    };
+    // Claude's hosted connector browser has been observed posting only the
+    // visible code field. The form action must preserve the OAuth context even
+    // when every hidden control is omitted.
+    const submitted = await submitAuthorize(
+        { code: offer.display.toLowerCase() },
+        authorizationContext
+    );
     assert.equal(submitted.status, 302);
 
     const location = new URL(submitted.headers.get('location'));

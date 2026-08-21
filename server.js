@@ -2153,7 +2153,13 @@ app.get('/oauth/authorize', async (req, res) => {
 });
 
 app.post('/oauth/authorize', async (req, res) => {
-    const parsed = await readAuthorizeRequest(req.body || {});
+    // Claude's hosted connector browser can submit only the visible code field
+    // and omit hidden inputs. The form action carries the same OAuth context in
+    // its query string, so merge both sources with the submitted body winning.
+    // Every value still goes through readAuthorizeRequest: registered client,
+    // exact redirect URI and PKCE are validated exactly as before.
+    const submitted = { ...(req.query || {}), ...(req.body || {}) };
+    const parsed = await readAuthorizeRequest(submitted);
     if (parsed.fail) {
         return res.status(400).send(oauth.renderAuthorizePage({
             clientName: 'Bilinmeyen istemci',
