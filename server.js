@@ -1508,27 +1508,31 @@ app.get('/sse', (req, res) => {
 });
 
 // Post endpoint for standard MCP client
-app.post('/message', async (req, res) => {
-    const auth = requireAuth(req, res);
-    if (!auth) return;
-
-    const { sessionId } = req.query;
-    const session = sessionId ? sseSessions.get(sessionId) : null;
-    if (!session) {
-        return res.status(404).json({ error: 'unknown_session', message: 'Oturum bulunamadı. SSE kanalını yeniden açın.' });
-    }
-    // Holding a session id is not enough — the credential must own that session.
-    if (session.clientId !== auth.clientId) {
-        return res.status(403).json({ error: 'session_mismatch', message: 'Bu oturum başka bir istemciye ait.' });
-    }
-
-    const rpcRequest = req.body;
+/**
+ * One JSON-RPC brain, two transports.
+ *
+ * This used to live inside the `/message` handler, which tied every answer to
+ * an open SSE channel. That was fine while HTTP+SSE was the only transport MCP
+ * had — but it is the *legacy* one now, and a client that speaks Streamable
+ * HTTP simply POSTs and waits for the reply in the same response. Such a client
+ * could not talk to this relay at all: there was no endpoint to POST to, so it
+ * failed at "cannot connect" long before OAuth was ever reached.
+ *
+ * So the dispatch takes a `send` and does not know or care where the payload
+ * goes. [ctx] carries the two things that differ between the transports: the
+ * name to write in the audit log, and somewhere to record what the client
+ * called itself (the SSE session has a place for it; a stateless POST does
+ * not).
+ *
+ * Returns 'notification' when the message needed no answer, so the transport
+ * can choose the right empty status.
+ */
+async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
     console.log(`[MCP] JSON-RPC from client=${auth.clientId} method=${rpcRequest && rpcRequest.method}`);
 
     if (!rpcRequest || typeof rpcRequest !== 'object') {
-        const errorResponse = { jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null };
-        sendSseJsonRpc(sessionId, errorResponse);
-        return res.status(200).send("accepted");
+        send({ jsonrpc: "2.0", error: { code: -32700, message: "Parse error" }, id: null });
+        return 'handled';
     }
 
     const { method, params, id } = rpcRequest;
@@ -1536,20 +1540,17 @@ app.post('/message', async (req, res) => {
     // Handle notifications (no response required in JSON-RPC, return 202 immediately)
     if (id === undefined || id === null) {
         if (method === 'notifications/initialized') {
-            addLog(auth.clientId, session.clientName, auth.record.deviceId, 'Sistem Hazır', 'success', 'MCP el sıkışması tamamlandı.');
+            addLog(auth.clientId, ctx.clientName, auth.record.deviceId, 'Sistem Hazır', 'success', 'MCP el sıkışması tamamlandı.');
         }
-        return res.status(202).send("accepted");
+        return 'notification';
     }
 
     // Helper to send JSON-RPC formatted responses
     const reply = (result, error = null) => {
         const payload = { jsonrpc: "2.0", id };
-        if (error) {
-            payload.error = error;
-        } else {
-            payload.result = result;
-        }
-        sendSseJsonRpc(sessionId, payload);
+        if (error) payload.error = error;
+        else payload.result = result;
+        send(payload);
     };
 
     // 1. Handle initialize handshake (CRITICAL for clients like Cursor / Claude Desktop)
@@ -1557,8 +1558,8 @@ app.post('/message', async (req, res) => {
         const clientInfo = params?.clientInfo || {};
         // The reported name is cosmetic only — identity comes from the
         // credential, never from anything the client sends here.
-        session.clientInfo = clientInfo;
-        addLog(auth.clientId, session.clientName, auth.record.deviceId, 'Başlatma', 'success', `Bildirilen istemci: ${String(clientInfo.name || 'bilinmiyor').substring(0, 40)}`);
+        ctx.setClientInfo(clientInfo);
+        addLog(auth.clientId, ctx.clientName, auth.record.deviceId, 'Başlatma', 'success', `Bildirilen istemci: ${String(clientInfo.name || 'bilinmiyor').substring(0, 40)}`);
 
         reply({
             protocolVersion: params?.protocolVersion || "2024-11-05",
@@ -1571,19 +1572,19 @@ app.post('/message', async (req, res) => {
                 description: "Android Real Browser MCP Bridge. To view full guide, parameters, and recommended agent workflows, call 'browser_get_tool_documentation'."
             }
         });
-        return res.status(200).send("accepted");
+        return 'handled';
     }
 
     // 2. Handle ping
     if (method === 'ping') {
         reply({});
-        return res.status(200).send("accepted");
+        return 'handled';
     }
 
     // 3. Handle tools list
     if (method === 'tools/list') {
         reply({ tools: TOOLS });
-        return res.status(200).send("accepted");
+        return 'handled';
     }
 
     // 4. Handle tools execution
@@ -1598,7 +1599,7 @@ app.post('/message', async (req, res) => {
         // Direct handling for Documentation / Skill Guide Tool (Zero-latency server response)
         if (toolName === "browser_get_tool_documentation" || toolName === "get_tool_documentation" || toolName === "browser_get_skills" || toolName === "get_skills") {
             const toolDocResponse = generateDocumentationResponse(cleanArgs.tool_name || cleanArgs.name, cleanArgs.category);
-            addLog(auth.clientId, session.clientName, 'köprü', `Dokümantasyon: ${toolName}`, 'success', String(cleanArgs.tool_name || 'all'));
+            addLog(auth.clientId, ctx.clientName, 'köprü', `Dokümantasyon: ${toolName}`, 'success', String(cleanArgs.tool_name || 'all'));
 
             const content = [
                 {
@@ -1607,7 +1608,7 @@ app.post('/message', async (req, res) => {
                 }
             ];
             reply({ content });
-            return res.status(200).send("accepted");
+            return 'handled';
         }
 
         let actionType = "";
@@ -1646,20 +1647,20 @@ app.post('/message', async (req, res) => {
                     isError: true,
                     content: [{ type: "text", text: "Oturum değiştirme kaldırıldı. Her istemci kendi izole profiline sabitlenmiştir; profil seçimi yalnızca cihaz sahibinin kararıdır." }]
                 });
-                return res.status(200).send("accepted");
+                return 'handled';
             default:
                 reply(null, { code: -32601, message: `Tool not found: ${toolName}` });
-                return res.status(200).send("accepted");
+                return 'handled';
         }
 
-        const clientName = session.clientName || 'AI istemcisi';
+        const clientName = ctx.clientName || 'AI istemcisi';
         const boundDeviceId = auth.record.deviceId;
 
         if (!(await enforceQuota(auth, (message) => {
             reply({ isError: true, content: [{ type: 'text', text: message }] });
         }))) {
             addLog(auth.clientId, clientName, boundDeviceId, `Kota aşıldı: ${toolName}`, 'error', 'Günlük komut kotası doldu.');
-            return res.status(200).send('accepted');
+            return 'handled';
         }
 
         try {
@@ -1689,7 +1690,7 @@ app.post('/message', async (req, res) => {
                         { type: "text", text: JSON.stringify(meta, null, 2) }
                     ]
                 });
-                return res.status(200).send("accepted");
+                return 'handled';
             }
 
             reply({ content: [{ type: "text", text: JSON.stringify(responseData, null, 2) }] });
@@ -1700,12 +1701,104 @@ app.post('/message', async (req, res) => {
                 content: [{ type: "text", text: `Hata: ${error.message}` }]
             });
         }
-        return res.status(200).send("accepted");
+        return 'handled';
     }
 
     // Default response for other unhandled methods
     reply({});
-    return res.status(200).send("accepted");
+    return 'handled';
+}
+
+/**
+ * Legacy transport: HTTP+SSE.
+ *
+ * The client holds a `GET /sse` channel open and POSTs here; answers go back
+ * out over that channel. Kept because clients configured against it still work.
+ */
+app.post('/message', async (req, res) => {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+
+    const { sessionId } = req.query;
+    const session = sessionId ? sseSessions.get(sessionId) : null;
+    if (!session) {
+        return res.status(404).json({ error: 'unknown_session', message: 'Oturum bulunamadı. SSE kanalını yeniden açın.' });
+    }
+    // Holding a session id is not enough — the credential must own that session.
+    if (session.clientId !== auth.clientId) {
+        return res.status(403).json({ error: 'session_mismatch', message: 'Bu oturum başka bir istemciye ait.' });
+    }
+
+    const outcome = await dispatchJsonRpc(
+        auth,
+        {
+            clientName: session.clientName || 'AI istemcisi',
+            setClientInfo(info) { session.clientInfo = info; }
+        },
+        req.body,
+        (payload) => sendSseJsonRpc(sessionId, payload)
+    );
+
+    return res.status(outcome === 'notification' ? 202 : 200).send('accepted');
+});
+
+/**
+ * Current transport: Streamable HTTP.
+ *
+ * One endpoint, one POST, one answer in the same response. This is what MCP
+ * moved to and what current clients try first; without it they report "cannot
+ * connect" and never get as far as the 401 that would have pointed them at
+ * OAuth.
+ *
+ * **Stateless on purpose.** The spec lets a server decline to issue an
+ * `Mcp-Session-Id`, and there is nothing here worth a session: identity comes
+ * from the credential on every request, and the browser state that matters
+ * lives on the phone, keyed by client. Adding a session id would create a
+ * second thing to expire, revoke and get wrong, protecting nothing.
+ */
+app.post('/mcp', async (req, res) => {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+
+    let answer = null;
+    const outcome = await dispatchJsonRpc(
+        auth,
+        {
+            clientName: auth.record.name || 'AI istemcisi',
+            // Nothing to remember: the reported name is cosmetic and identity
+            // never comes from it.
+            setClientInfo() {}
+        },
+        req.body,
+        (payload) => { answer = payload; }
+    );
+
+    res.setHeader('Cache-Control', 'no-store');
+    if (outcome === 'notification' || !answer) return res.status(202).end();
+    return res.status(200).json(answer);
+});
+
+/**
+ * The spec allows a client to open a stream here for server-initiated
+ * messages. This relay never sends one — every answer rides the POST that
+ * asked for it — so it says so rather than holding a socket that will never
+ * carry anything.
+ */
+app.get('/mcp', (req, res) => {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    res.setHeader('Allow', 'POST, DELETE');
+    return res.status(405).json({
+        error: 'stream_not_offered',
+        message: 'Bu uç sunucu kaynaklı akış sunmaz; her yanıt kendi POST isteğinde döner.'
+    });
+});
+
+/** Session teardown. There is no session, so this is an acknowledgement. */
+app.delete('/mcp', (req, res) => {
+    const auth = requireAuth(req, res);
+    if (!auth) return;
+    return res.status(200).end();
 });
 
 function markMarkdownAsSingleResponse(responseData) {
@@ -1921,6 +2014,7 @@ function setChallengeHeader(req, res) {
 app.get([
     '/.well-known/oauth-protected-resource',
     '/.well-known/oauth-protected-resource/sse',
+    '/.well-known/oauth-protected-resource/mcp',
     '/.well-known/oauth-protected-resource/message'
 ], (req, res) => {
     res.json(oauth.protectedResourceMetadata(oauth.originOf(req)));
@@ -1929,6 +2023,7 @@ app.get([
 app.get([
     '/.well-known/oauth-authorization-server',
     '/.well-known/oauth-authorization-server/sse',
+    '/.well-known/oauth-authorization-server/mcp',
     '/.well-known/oauth-authorization-server/message'
 ], (req, res) => {
     res.json(oauth.authorizationServerMetadata(oauth.originOf(req)));

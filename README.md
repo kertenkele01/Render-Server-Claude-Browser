@@ -146,8 +146,9 @@ npm test
 
 | Uç | Kimlik | Ne yapar |
 | --- | --- | --- |
-| `GET /sse` | İstemci anahtarı | MCP SSE kanalı |
-| `POST /message` | İstemci anahtarı | JSON-RPC araç çağrıları |
+| `POST /mcp` | İstemci anahtarı | **Streamable HTTP** — güncel istemcilerin kullandığı uç |
+| `GET /sse` | İstemci anahtarı | Eski HTTP+SSE kanalı |
+| `POST /message` | İstemci anahtarı | Eski kanalın JSON-RPC ucu |
 | `POST /tools/*` | İstemci anahtarı | REST yedek uçları |
 | `GET /healthz` | Yok | Sağlık kontrolü |
 | `GET /.well-known/oauth-protected-resource` | Yok | Kaynak keşif belgesi (RFC 9728) |
@@ -160,6 +161,31 @@ npm test
 | `GET /`, `/audit`, `/account` | Operatör oturumu | Operatör konsolu |
 | `GET /api/status` | Operatör oturumu | Röle toplamları ve hesap listesi |
 | WebSocket `/` | `deviceSecret` | Android cihaz bağlantısı |
+
+## Taşımalar
+
+İki tane, ve yenisi isteğe bağlı değil.
+
+`POST /mcp` **Streamable HTTP**: tek uç, tek POST, yanıt aynı cevapta. MCP'nin
+geçtiği ve güncel istemcilerin ilk denediği taşıma bu. Yokken röle yalnızca
+eskimiş görünmüyordu — istemci POST atıyor, yalnızca `GET /sse`'si olan bir
+sunucudan 404 alıyor ve *sunucuya bağlanılamadı* diyordu. Bu, kimlik doğrulanan
+hiçbir yola varmadan oluyor; dolayısıyla OAuth işaretçisini taşıyan 401 hiç
+görülmüyor ve yetkilendirme akışı tam da kendisi için yazıldığı istemciler
+tarafından erişilemez kalıyordu.
+
+`GET /sse` + `POST /message` eski HTTP+SSE çifti; ona göre yapılandırılmış
+istemciler çalışmaya devam ettiği için duruyor.
+
+İkisi de ince. `dispatchJsonRpc` bütün metotları tutuyor ve yükün nereye
+gittiğini bilmeyen bir `send` alıyor. Bir test ikisinin aynı çağrıya aynı yanıtı
+verdiğini doğruluyor: bir istemcinin aldığı sonuç, hangi taşımayı pazarlık
+ettiğine bağlı olmamalı.
+
+`/mcp` **durumsuz**. Spec sunucunun `Mcp-Session-Id` vermemesine izin veriyor ve
+burada oturuma değecek bir şey yok: kimlik her istekte kimlik bilgisiyle geliyor,
+önemli tarayıcı durumu telefonda duruyor. `GET /mcp` akış tutmak yerine 405
+diyor — röle sunucu kaynaklı mesaj göndermiyor.
 
 ## OAuth
 
