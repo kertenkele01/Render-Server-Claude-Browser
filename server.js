@@ -422,7 +422,7 @@ const TOOLS = [
     },
     {
         name: "browser_pick_date",
-        description: "Bir tarih seçer — hem gerçek tarih alanlarında (input type=date) hem de rezervasyon ve uçuş sitelerinin çizdiği takvim bileşenlerinde. Tarihi her zaman YYYY-AA-GG biçiminde verin (ör. '2026-09-15'). Takvim hücrelerinin çoğu ekranda yalnızca gün sayısını gösterir; hangi aya ait olduğunu cihaz çözer, gerekirse ay oklarına basarak istenen aya kadar ilerler ve doğru hücreye tıklar. Takvim kapalıysa 'selector' olarak tarih alanının numarasını verin, önce o açılır. Gün doluysa/kapalıysa ya da tarih takvimin izin verdiği aralığın dışındaysa yanıt bunu ve görünen aralığı söyler — aynı çağrıyı tekrarlamak yardımcı olmaz.",
+        description: "Bir tarih seçer — hem gerçek tarih alanlarında (input type=date) hem de rezervasyon ve uçuş sitelerinin çizdiği takvim bileşenlerinde. Tarihi her zaman YYYY-AA-GG biçiminde verin (ör. '2026-09-15'). Takvim hücrelerinin çoğu ekranda yalnızca gün sayısını gösterir; hangi aya ait olduğunu cihaz çözer, istenen aya kendisi ilerler — takvim ay/yıl açılır listesi sunuyorsa tek adımda oradan, sunmuyorsa ay oklarına basarak — ve doğru hücreye tıklar. Doğum tarihi gibi uzak tarihler de bu yüzden tek çağrıda seçilebilir. Takvim kapalıysa 'selector' olarak tarih alanının numarasını verin, önce o açılır. Gün doluysa/kapalıysa ya da tarih takvimin izin verdiği aralığın dışındaysa yanıt bunu ve görünen aralığı söyler — aynı çağrıyı tekrarlamak yardımcı olmaz.",
         inputSchema: {
             type: "object",
             properties: {
@@ -706,7 +706,7 @@ const TOOL_DOCUMENTATION = {
                 selector: "(Opsiyonel, String) Tarih alanının ya da takvimi açan öğenin element ID sayısı."
             },
             example_call: { date: "2026-09-15", selector: "34" },
-            best_practice: "Rezervasyon sitelerinde takvim hücreleri ekranda yalnızca gün sayısını gösterir; hangi ay olduğunu tahmin etmeyin, bu aracı kullanın. Takvim kapalıysa 'selector' verin. Yanıt 'seçilemez' ya da 'aralık dışında' diyorsa tarih gerçekten yoktur — tekrar denemek yerine kullanıcıya durumu söyleyin."
+            best_practice: "Rezervasyon sitelerinde takvim hücreleri ekranda yalnızca gün sayısını gösterir; hangi ay olduğunu tahmin etmeyin, bu aracı kullanın. Takvim kapalıysa 'selector' verin. Gidiş-dönüş gibi aralık seçen takvimlerde aracı iki kez çağırın: ilk çağrı aralığın başını, ikincisi sonunu seçer. Yanıt 'seçilemez' ya da 'aralık dışında' diyorsa tarih gerçekten yoktur — tekrar denemek yerine kullanıcıya durumu söyleyin."
         },
         browser_read_form: {
             name: "browser_read_form",
@@ -873,7 +873,7 @@ const TOOL_DOCUMENTATION = {
         {
             title: "Form ve rezervasyon sitelerinde çalışma",
             steps: [
-                "1. Sayfaya gidin; yanıttaki 'headings' ile doğru yerde olduğunuzu doğrulayın.",
+                "1. Sayfaya gidin; yanıttaki 'headings' ile doğru yerde olduğunuzu doğrulayın. Yanıtlarda 'consent_wall' görürseniz forma girişmeden önce onu kapatın — bant hem ekranı hem tıklamaları örter. Kullanıcı aksini söylemediyse 'reject_id' ile en az veri paylaşan seçeneği kullanın; 'accept_id' yalnızca reddetme düğmesi bulunamadığında kalır.",
                 "2. 'browser_get_markdown' çağırın — element numaraları bu geçişte atanır, öncesinde numarayla tıklayamazsınız. Bağlantılardaki fiil hangi aracı kullanacağınızı söyler: type: / select: / pick_date: / click:.",
                 "3. Formun tam durumunu 'browser_read_form' ile alın: zorunlu alanlar, açılır liste seçenekleri ve devre dışı alanlar buradadır. Bundan sonra her adımda tüm sayfayı değil bunu okuyun.",
                 "4. Sıradan alanları tek seferde doldurun: 'browser_fill_form' (tek tur, tek onay).",
@@ -881,7 +881,7 @@ const TOOL_DOCUMENTATION = {
                 "6. Tarihler için 'browser_pick_date' (YYYY-AA-GG). Takvim hücreleri ekranda sadece gün sayısı gösterir; ay tahmin etmeyin.",
                 "7. Şehir/havalimanı gibi öneri listesi açan alanlar istisnadır: 'browser_type' ile karakter karakter yazılır, sonra yanıttaki 'suggestions' listesinden numarayla 'browser_click' ya da 'browser_press_key' ile ArrowDown + Enter.",
                 "8. Göndermeden önce 'browser_read_form' ile doğrulayın: 'missing_required' boşsa form tamamdır.",
-                "9. Gönderdikten sonra yanıttaki 'invalid_fields' ve 'alerts' alanlarına bakın — sayfa formu neden kabul etmediğini orada söyler. 'page_changed' false ve bu alanlar boşsa ilerlememişsinizdir; aynı adımı tekrarlamak yardımcı olmaz.",
+                "9. Gönderdikten sonra yanıttaki 'invalid_fields' ve 'alerts' alanlarına bakın — sayfa formu neden kabul etmediğini (hatalı giriş, geçersiz alan) orada söyler. Yanıt sayfanın yeni içerik yüklediğini söylüyorsa gönderim gitmiştir: düğmeye tekrar basmayın, 'browser_wait_for' ile bekleyip sonucu okuyun. 'page_changed' false ve bu alanlar da boşsa gerçekten ilerlememişsinizdir; aynı adımı tekrarlamak yardımcı olmaz.",
                 "10. Sonuçların yüklenmesini 'browser_wait_for' ile bekleyin. Bir onay kutusu ('dialog') çıktıysa 'browser_handle_dialog' ile yanıtı ayarlayıp adımı tekrarlayın."
             ]
         },
