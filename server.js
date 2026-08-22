@@ -882,7 +882,8 @@ const TOOL_DOCUMENTATION = {
                 "7. Şehir/havalimanı gibi öneri listesi açan alanlar istisnadır: 'browser_type' ile karakter karakter yazılır, sonra yanıttaki 'suggestions' listesinden numarayla 'browser_click' ya da 'browser_press_key' ile ArrowDown + Enter.",
                 "8. Göndermeden önce 'browser_read_form' ile doğrulayın: 'missing_required' boşsa form tamamdır.",
                 "9. Gönderdikten sonra yanıttaki 'invalid_fields' ve 'alerts' alanlarına bakın — sayfa formu neden kabul etmediğini (hatalı giriş, geçersiz alan) orada söyler. Yanıt sayfanın yeni içerik yüklediğini söylüyorsa gönderim gitmiştir: düğmeye tekrar basmayın, 'browser_wait_for' ile bekleyip sonucu okuyun. 'page_changed' false ve bu alanlar da boşsa gerçekten ilerlememişsinizdir; aynı adımı tekrarlamak yardımcı olmaz.",
-                "10. Sonuçların yüklenmesini 'browser_wait_for' ile bekleyin. Bir onay kutusu ('dialog') çıktıysa 'browser_handle_dialog' ile yanıtı ayarlayıp adımı tekrarlayın."
+                "10. Sonuçların yüklenmesini 'browser_wait_for' ile bekleyin. Bir onay kutusu ('dialog') çıktıysa 'browser_handle_dialog' ile yanıtı ayarlayıp adımı tekrarlayın.",
+                "11. Yanıtta 'captcha' alanı görürseniz sayfa insan doğrulaması istiyor demektir. Cihaz sayfayı sizin için bir kez yeniler; doğrulama yine duruyorsa çözmeye çalışmayın — denemeler engeli sertleştirir ve o sayfadan okuduğunuz içerik eksik olur. Kullanıcıya durumu söyleyip telefondan doğrulamayı kendisinin tamamlamasını isteyin, sonra adımı tekrarlayın."
             ]
         },
         {
