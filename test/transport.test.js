@@ -63,7 +63,7 @@ function connectDevice() {
                     type: 'response',
                     messageId: payload.messageId,
                     status: 'success',
-                    data: { url: 'https://example.com/', markdown: 'merhaba dünya' }
+                    data: { url: 'https://example.com/', markdown: 'merhaba dünya', action: payload.type }
                 }));
             }
         });
@@ -233,6 +233,8 @@ test('araç listesi ve araç çağrısı POST yanıtında döner', async () => {
     assert.equal(list.status, 200);
     const names = list.body.result.tools.map((t) => t.name);
     assert.ok(names.includes('browser_get_markdown'));
+    assert.ok(names.includes('browser_reload'), 'yenileme aracı listelenmeli');
+    assert.ok(names.includes('browser_click_at'), 'koordinat tıklama aracı listelenmeli');
     assert.ok(names.includes('browser_select_option'), 'form araçları listelenmeli');
     assert.ok(names.includes('browser_pick_date'));
 
@@ -246,6 +248,27 @@ test('araç listesi ve araç çağrısı POST yanıtında döner', async () => {
     assert.equal(call.body.id, 3);
     const text = call.body.result.content[0].text;
     assert.match(text, /merhaba dünya/, 'cihazın yanıtı istemciye ulaşmadı');
+
+    const reload = await rpc({
+        jsonrpc: '2.0',
+        id: 31,
+        method: 'tools/call',
+        params: { name: 'browser_reload', arguments: { read: true } }
+    });
+    assert.equal(reload.status, 200);
+    assert.equal(JSON.parse(reload.body.result.content[0].text).action, 'reload');
+
+    const coordinateClick = await rpc({
+        jsonrpc: '2.0',
+        id: 32,
+        method: 'tools/call',
+        params: {
+            name: 'browser_click_at',
+            arguments: { screenshot_id: 'shot_test', cell: 'A1' }
+        }
+    });
+    assert.equal(coordinateClick.status, 200);
+    assert.equal(JSON.parse(coordinateClick.body.result.content[0].text).action, 'click_at');
 });
 
 test('bilinmeyen araç JSON-RPC hatası döner', async () => {

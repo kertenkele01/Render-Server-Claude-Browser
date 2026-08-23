@@ -284,6 +284,19 @@ const TOOLS = [
         }
     },
     {
+        name: "browser_reload",
+        description: "Aktif sekmedeki mevcut belgeyi tarayıcının gerçek yenileme işlemiyle yeniden yükler ve sayfa yerleştiğinde başlık, gerçek adres, başlık listesi ve öğe sayılarını döner. Aynı URL'ye browser_navigate çağırmaktan farklı olarak mevcut tarayıcı girişini yeniler. Bayat içerik veya geçici yükleme hatasında kullanın; CAPTCHA ya da işlem sonucunu değiştirmek için art arda yenilemeyin. İçeriği de aynı yanıtta almak için read=true verin.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                read: { type: "boolean", description: "true verilirse yenilenen sayfanın Markdown içeriği de aynı yanıtta döner." },
+                offset: { type: "integer", minimum: 0, description: "'read' true iken okunacak Markdown parçasının başlangıç karakteri." },
+                tabId: { type: "string", description: "Yenilenecek sekmenin ID'si (opsiyonel, verilmezse aktif sekme)." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            }
+        }
+    },
+    {
         name: "browser_search",
         description: "Google'da arama yapar ve sonuç sayfasının özetini döner: başlık, başlık listesi, link sayısı ve sayfa uzunluğu. Sonuçları okumak için 'browser_get_markdown' çağırın veya 'read' parametresini true verin.",
         inputSchema: {
@@ -299,11 +312,14 @@ const TOOLS = [
     },
     {
         name: "browser_screenshot",
-        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. Android yalnızca ekranda olan bir WebView'ı çizdiği için: sekme ekrandaysa doğrudan alınır; arka plandaki bir sekme için uygulama telefonda açıksa cihaz o sekmeyi bir anlığına ekrana alır, görüntüyü çeker ve ekranı eski haline döndürür (yanıtta 'captured_by_showing_tab' true olur). Uygulama ön planda değilse 'blank_capture' hatası döner — sayfa yüklüdür, yalnızca çizilmemiştir; içeriği 'browser_get_markdown' ile okuyun. Video, WebGL ve bazı canvas içerikleri ekrandayken bile boş çıkabilir.",
+        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. grid=true verilirse görünen alan 15×20 yarı saydam hücreye ayrılır, A1..O20 etiketleri ve 30 saniyelik tek kullanımlık screenshot_id döner; ardından browser_click_at ile hücreye veya kesin piksele fiziksel dokunabilirsiniz. Grid yalnızca görünür alan içindir ve fullPage'i geçersiz kılar. Android yalnızca ekranda olan bir WebView'ı çizdiği için arka plandaki sekme, uygulama ön plandaysa bir anlığına gösterilip geri alınır. Uygulama ön planda değilse blank_capture döner.",
         inputSchema: {
             type: "object",
             properties: {
                 fullPage: { type: "boolean", description: "true ise yalnızca görünen alan yerine sayfanın tamamı yakalanır. Telefonda o an ekranda olan sekmede yok sayılır (yanıt 'full_page' alanında hangisinin alındığını bildirir)." },
+                grid: { type: "boolean", description: "true ise görüntünün üzerine koordinat hücreleri çizer ve browser_click_at için screenshot_id üretir. Grid modunda fullPage yok sayılır." },
+                grid_columns: { type: "integer", minimum: 4, maximum: 26, description: "Grid sütun sayısı. Varsayılan 15; sütunlar A-Z ile adlandırılır." },
+                grid_rows: { type: "integer", minimum: 4, maximum: 40, description: "Grid satır sayısı. Varsayılan 20." },
                 tabId: { type: "string", description: "Hedef sekme ID'si (opsiyonel, verilmezse oturumun aktif sekmesi)" },
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             }
@@ -351,6 +367,24 @@ const TOOLS = [
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             },
             required: ["selector"]
+        }
+    },
+    {
+        name: "browser_click_at",
+        description: "browser_screenshot(grid=true) çıktısındaki tek kullanımlık screenshot_id ile WebView'a gerçek Android dokunuşu gönderir. DOM numarasıyla browser_click standart ve daha güvenilir yöntemdir; bu aracı canvas, harita, cross-origin iframe veya seçiciyle bulunamayan görsel kontroller için kullanın. Ya cell ('H12') ve isteğe bağlı hücre içi x_ratio/y_ratio, ya da görüntü pikseli olarak x/y verin. Sayfa adresi, kaydırma, görünür alan veya 30 saniyelik süre değiştiyse stale_screenshot ile reddeder. <select>, disabled ve dosya yükleme alanları güvenli alternatifleriyle birlikte reddedilir. Yanıt tıklanan öğeyi ve sayfadaki etkiyi bildirir.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                screenshot_id: { type: "string", description: "browser_screenshot(grid=true) yanıtındaki tek kullanımlık görüntü kimliği." },
+                cell: { type: "string", pattern: "^[A-Za-z][0-9]{1,2}$", description: "Grid hücresi, örn. H12. Verilirse x/y vermeyin." },
+                x_ratio: { type: "number", minimum: 0, maximum: 1, description: "cell içinde soldan konum; varsayılan 0.5 (merkez). Küçük hedeflerde hassaslaştırır." },
+                y_ratio: { type: "number", minimum: 0, maximum: 1, description: "cell içinde yukarıdan konum; varsayılan 0.5 (merkez)." },
+                x: { type: "number", minimum: 0, description: "Dönen JPEG üzerindeki kesin x pikseli. cell ile birlikte kullanmayın." },
+                y: { type: "number", minimum: 0, description: "Dönen JPEG üzerindeki kesin y pikseli. cell ile birlikte kullanmayın." },
+                tabId: { type: "string", description: "Opsiyonel; görüntünün sekmesi kimlikten otomatik bulunur." },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            },
+            required: ["screenshot_id"]
         }
     },
     {
@@ -601,11 +635,11 @@ const TOOL_DOCUMENTATION = {
     categories: {
         navigation: {
             name: "Sayfa Gezinme & Arama",
-            tools: ["browser_navigate", "browser_search", "browser_scroll", "browser_list_shortcuts"]
+            tools: ["browser_navigate", "browser_reload", "browser_search", "browser_scroll", "browser_list_shortcuts"]
         },
         interaction: {
             name: "Etkileşim, Tıklama & Form Doldurma",
-            tools: ["browser_click", "browser_type", "browser_select_option", "browser_pick_date", "browser_read_form", "browser_fill_form", "browser_press_key", "browser_wait_for", "browser_handle_dialog", "browser_toggle_overlay", "browser_execute_js"]
+            tools: ["browser_click", "browser_click_at", "browser_type", "browser_select_option", "browser_pick_date", "browser_read_form", "browser_fill_form", "browser_press_key", "browser_wait_for", "browser_handle_dialog", "browser_toggle_overlay", "browser_execute_js"]
         },
         content_extraction: {
             name: "İçerik Okuma",
@@ -641,6 +675,19 @@ const TOOL_DOCUMENTATION = {
             },
             example_call: { url: "https://www.google.com" },
             best_practice: "Yanıt zaten sayfanın özetini taşır: gerçek adres, başlık, 'headings' listesi ve uzunluk. Önce ona bakın — aradığınız bölüm listede yoksa sayfayı hiç okumadan başka bir adrese geçebilirsiniz. Okumaya karar verirseniz 'browser_get_markdown' çağırın; içeriği kesin istiyorsanız baştan read=true verin ve bir turdan tasarruf edin."
+        },
+        browser_reload: {
+            name: "browser_reload",
+            category: "navigation",
+            summary: "Aktif sekmedeki mevcut belgeyi tarayıcının gerçek yenileme işlemiyle yeniden yükler.",
+            parameters: {
+                read: "(Opsiyonel, Boolean) true ise yenilenen sayfanın Markdown içeriğini aynı yanıta ekler.",
+                offset: "(Opsiyonel, Integer) read=true iken Markdown parçasının başlangıç karakteri.",
+                tabId: "(Opsiyonel, String) Yenilenecek sekmenin ID'si.",
+                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
+            },
+            example_call: { read: true },
+            best_practice: "Bayat içerik, geçici ağ hatası veya kullanıcının yaptığı bir değişiklikten sonra aynı belgeyi yeniden istemek için kullanın. Yeni bir adrese gitmek için browser_navigate kullanın. CAPTCHA ve başarısız işlemlerde tekrar tekrar yenilemeyin."
         },
         browser_search: {
             name: "browser_search",
@@ -678,10 +725,13 @@ const TOOL_DOCUMENTATION = {
             summary: "Sekmenin JPEG görüntüsünü MCP görüntü bloğu olarak döner. Uygulama telefonda açıkken arka plandaki sekmeler için de çalışır: cihaz sekmeyi bir anlığına ekrana alıp geri döner.",
             parameters: {
                 fullPage: "(Opsiyonel, Boolean) Varsayılan false. true ise sayfanın tamamı yakalanır.",
+                grid: "(Opsiyonel, Boolean) true ise görünür alanı etiketli hücrelere böler ve browser_click_at için screenshot_id üretir.",
+                grid_columns: "(Opsiyonel, Integer) 4–26; varsayılan 15.",
+                grid_rows: "(Opsiyonel, Integer) 4–40; varsayılan 20.",
                 tabId: "(Opsiyonel, String) Hedef sekme; verilmezse oturumun aktif sekmesi.",
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            best_practice: "Sayfanın yapısını anlamak için önce 'browser_get_markdown' kullanın — metin hem daha ucuz hem daha kesindir. Ekran görüntüsünü, yerleşimi görmeniz gereken durumlarda (bir öğe gerçekten görünüyor mu, bir grafik neye benziyor, tıklama doğru yere gitti mi) tercih edin. Yanıttaki 'full_page' alanı tam sayfa mı yoksa yalnızca görünen alan mı alındığını söyler; 'browser_toggle_overlay' ile birlikte kullanırsanız tıklanabilir öğelerin numaraları da görüntüde görünür.",
+            best_practice: "Sayfanın yapısını anlamak için önce browser_get_markdown kullanın. Seçiciyle bulunamayan canvas, harita veya iframe kontrolü için grid=true ile görünür alanı alın ve dönen screenshot_id'yi hemen browser_click_at ile kullanın. Hücrenin merkezi küçük hedefi kaçırıyorsa x_ratio/y_ratio verin ya da görüntüdeki kesin x/y pikselini kullanın. Grid ile fullPage birlikte kullanılmaz.",
             limitations: "Uygulama ön planda değilken hiçbir sekme çizilmez ve 'blank_capture' döner; bu durumda içeriği metin olarak okuyun. Ekrana alma birkaç yüz milisaniye sürer ve kullanıcının ekranı o an kısaca değişir, bu yüzden döngü içinde çağırmayın. Aynı anda yalnızca bir ekrana alma yapılabilir. Tam sayfa yakalama yalnızca ekran dışı çizimde mümkündür; ekrana alınarak çekilen görüntülerde yalnızca görünen alan gelir. Görüntü 720 piksel genişliğe ölçeklenir ve JPEG olarak sıkıştırılır. Video, WebGL ve GPU ile birleştirilen bazı canvas içerikleri boş çıkabilir."
         },
         browser_select_option: {
@@ -757,6 +807,21 @@ const TOOL_DOCUMENTATION = {
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
             best_practice: "Yanıttaki 'page_changed' alanına bakın. False ise öğe bulunmuş ama bir şey olmamıştır — aynı tıklamayı tekrarlamak yardımcı olmaz; sayfayı yeniden okuyup başka bir öğe deneyin. 'suggestions' geldiyse bir liste açılmıştır, listeden seçin. 'new_url' geldiyse element numaraları geçersizdir, devam etmeden önce sayfayı yeniden okuyun."
+        },
+        browser_click_at: {
+            name: "browser_click_at",
+            category: "interaction",
+            summary: "Gridli ekran görüntüsündeki hücreye veya piksele gerçek Android dokunuşu gönderir.",
+            parameters: {
+                screenshot_id: "(Zorunlu, String) grid=true ekran görüntüsünün 30 saniyelik, tek kullanımlık kimliği.",
+                cell: "(String) A1..O20 gibi hücre etiketi.",
+                x_ratio: "(Opsiyonel, Number) Hücre içinde soldan 0–1; varsayılan 0.5.",
+                y_ratio: "(Opsiyonel, Number) Hücre içinde yukarıdan 0–1; varsayılan 0.5.",
+                x: "(Number) JPEG üzerindeki kesin x pikseli; cell ile birlikte verilmez.",
+                y: "(Number) JPEG üzerindeki kesin y pikseli; cell ile birlikte verilmez."
+            },
+            example_call: { screenshot_id: "shot_abc123", cell: "H12", x_ratio: 0.7, y_ratio: 0.35 },
+            best_practice: "Önce DOM numarasıyla browser_click kullanın. Bu araç görsel yedektir. Ekran görüntüsünü aldıktan hemen sonra çağırın; sayfa kaydıysa veya değiştiyse yeni görüntü alın. Aynı screenshot_id ikinci kez kullanılamaz. Yanıttaki label/tag ve page_changed alanları gerçek hedefi ve etkiyi doğrular."
         },
         browser_press_key: {
             name: "browser_press_key",
@@ -1615,6 +1680,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
         let actionType = "";
         switch (toolName) {
             case "browser_navigate": actionType = "navigate"; break;
+            case "browser_reload": actionType = "reload"; break;
             case "browser_search": actionType = "search"; break;
             case "browser_get_html": actionType = "get_html"; break;
             // One markdown tool. The old names still dispatch so a client
@@ -1624,6 +1690,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             case "browser_get_markdown": actionType = "get_markdown"; break;
             case "browser_scroll": actionType = "scroll"; break;
             case "browser_click": actionType = "click"; break;
+            case "browser_click_at": actionType = "click_at"; break;
             case "browser_type": actionType = "type"; break;
             case "browser_select_option": actionType = "select_option"; break;
             case "browser_pick_date": actionType = "pick_date"; break;
@@ -1900,6 +1967,9 @@ const directToolHandler = async (type, req, res) => {
 const fallbackRoutes = [
     { path: '/mcp/tools/browser_navigate', type: 'navigate' },
     { path: '/tools/browser_navigate', type: 'navigate' },
+
+    { path: '/mcp/tools/browser_reload', type: 'reload' },
+    { path: '/tools/browser_reload', type: 'reload' },
     
     { path: '/mcp/tools/browser_search', type: 'search' },
     { path: '/tools/browser_search', type: 'search' },
@@ -1923,6 +1993,9 @@ const fallbackRoutes = [
     
     { path: '/mcp/tools/browser_click', type: 'click' },
     { path: '/tools/browser_click', type: 'click' },
+
+    { path: '/mcp/tools/browser_click_at', type: 'click_at' },
+    { path: '/tools/browser_click_at', type: 'click_at' },
     
     { path: '/mcp/tools/browser_type', type: 'type' },
     { path: '/tools/browser_type', type: 'type' },

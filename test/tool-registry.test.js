@@ -104,3 +104,18 @@ test('etkileşim kategorisi form araçlarını listeler', () => {
         assert.ok(category[1].includes(name), `'${name}' interaction kategorisinde listelenmemiş`);
     }
 });
+
+test('görsel koordinat araçları şema yönlendirme belge ve REST yollarında eksiksiz', () => {
+    const declared = declaredTools();
+    const dispatched = dispatchedTools();
+    const documented = documentedTools();
+
+    assert.ok(declared.has('browser_screenshot'));
+    assert.ok(declared.has('browser_click_at'));
+    assert.ok(dispatched.has('browser_click_at'));
+    assert.ok(documented.has('browser_screenshot'));
+    assert.ok(documented.has('browser_click_at'));
+    assert.ok(SOURCE.includes("'/mcp/tools/browser_click_at'"));
+    assert.match(SOURCE, /grid_columns/);
+    assert.match(SOURCE, /screenshot_id/);
+});
