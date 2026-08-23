@@ -265,6 +265,54 @@ test('CIMD belgesi kimliği ve yönlendirme adresini doğrular', () => {
     }).error, /client_id/i);
 });
 
+test('ChatGPT CIMD geçiş belgesinde ortak none yöntemi seçilir', () => {
+    const clientId = 'https://chatgpt.com/oauth/client.json';
+    const outcome = oauth.validateClientMetadataDocument(clientId, {
+        client_id: clientId,
+        client_name: 'ChatGPT',
+        redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect'],
+        token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
+        token_endpoint_auth_method: 'private_key_jwt'
+    });
+
+    assert.equal(outcome.error, undefined);
+    assert.equal(outcome.record.id, clientId);
+    assert.equal(outcome.record.tokenEndpointAuthMethod, 'none');
+});
+
+test('CIMD belgesinde ortak token doğrulama yöntemi yoksa reddedilir', () => {
+    const clientId = 'https://client.example/oauth/client.json';
+    const base = {
+        client_id: clientId,
+        client_name: 'Özel istemci',
+        redirect_uris: ['https://client.example/oauth/callback']
+    };
+
+    assert.match(oauth.validateClientMetadataDocument(clientId, {
+        ...base,
+        token_endpoint_auth_methods_supported: ['private_key_jwt'],
+        token_endpoint_auth_method: 'private_key_jwt'
+    }).error, /none/);
+
+    assert.match(oauth.validateClientMetadataDocument(clientId, {
+        ...base,
+        token_endpoint_auth_methods_supported: 'none'
+    }).error, /geçerli bir yöntem listesi/i);
+});
+
+test('doğrulanamayan OAuth isteği kod formu göstermez', () => {
+    const html = oauth.renderAuthorizePage({
+        clientName: 'Bilinmeyen istemci',
+        hidden: {},
+        error: 'client_id eksik.'
+    });
+
+    assert.match(html, /Bağlantı kurulamadı/);
+    assert.match(html, /client_id eksik/);
+    assert.doesNotMatch(html, /<form\b/i);
+    assert.doesNotMatch(html, /name="code"/i);
+});
+
 // --- registration ----------------------------------------------------------
 
 test('istemci kendini kaydedebilir', async () => {
