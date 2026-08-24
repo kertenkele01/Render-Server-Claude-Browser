@@ -312,14 +312,14 @@ const TOOLS = [
     },
     {
         name: "browser_screenshot",
-        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. grid=true verilirse görünen alan 15×20 yarı saydam hücreye ayrılır, A1..O20 etiketleri ve 30 saniyelik tek kullanımlık screenshot_id döner; ardından browser_click_at ile hücreye veya kesin piksele fiziksel dokunabilirsiniz. Grid yalnızca görünür alan içindir ve fullPage'i geçersiz kılar. Android yalnızca ekranda olan bir WebView'ı çizdiği için arka plandaki sekme, uygulama ön plandaysa bir anlığına gösterilip geri alınır. Uygulama ön planda değilse blank_capture döner.",
+        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. grid=true verilirse görünen alan varsayılan olarak yaklaşık 48 px karelerden oluşan 15×24 yarı saydam hücreye ayrılır, A1..O24 etiketleri ve 30 saniyelik tek kullanımlık screenshot_id döner; grid_columns/grid_rows ile yoğunluk isteğe göre değiştirilebilir. Ardından browser_click_at ile hücreye veya kesin piksele fiziksel dokunabilirsiniz. Grid yalnızca görünür alan içindir ve fullPage'i geçersiz kılar. Android yalnızca ekranda olan bir WebView'ı çizdiği için arka plandaki sekme, uygulama ön plandaysa bir anlığına gösterilip geri alınır. Uygulama ön planda değilse blank_capture döner.",
         inputSchema: {
             type: "object",
             properties: {
                 fullPage: { type: "boolean", description: "true ise yalnızca görünen alan yerine sayfanın tamamı yakalanır. Telefonda o an ekranda olan sekmede yok sayılır (yanıt 'full_page' alanında hangisinin alındığını bildirir)." },
                 grid: { type: "boolean", description: "true ise görüntünün üzerine koordinat hücreleri çizer ve browser_click_at için screenshot_id üretir. Grid modunda fullPage yok sayılır." },
                 grid_columns: { type: "integer", minimum: 4, maximum: 26, description: "Grid sütun sayısı. Varsayılan 15; sütunlar A-Z ile adlandırılır." },
-                grid_rows: { type: "integer", minimum: 4, maximum: 40, description: "Grid satır sayısı. Varsayılan 20." },
+                grid_rows: { type: "integer", minimum: 4, maximum: 40, description: "Grid satır sayısı. Varsayılan 24." },
                 tabId: { type: "string", description: "Hedef sekme ID'si (opsiyonel, verilmezse oturumun aktif sekmesi)" },
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             }
@@ -727,7 +727,7 @@ const TOOL_DOCUMENTATION = {
                 fullPage: "(Opsiyonel, Boolean) Varsayılan false. true ise sayfanın tamamı yakalanır.",
                 grid: "(Opsiyonel, Boolean) true ise görünür alanı etiketli hücrelere böler ve browser_click_at için screenshot_id üretir.",
                 grid_columns: "(Opsiyonel, Integer) 4–26; varsayılan 15.",
-                grid_rows: "(Opsiyonel, Integer) 4–40; varsayılan 20.",
+                grid_rows: "(Opsiyonel, Integer) 4–40; varsayılan 24.",
                 tabId: "(Opsiyonel, String) Hedef sekme; verilmezse oturumun aktif sekmesi.",
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
@@ -814,7 +814,7 @@ const TOOL_DOCUMENTATION = {
             summary: "Gridli ekran görüntüsündeki hücreye veya piksele gerçek Android dokunuşu gönderir.",
             parameters: {
                 screenshot_id: "(Zorunlu, String) grid=true ekran görüntüsünün 30 saniyelik, tek kullanımlık kimliği.",
-                cell: "(String) A1..O20 gibi hücre etiketi.",
+                cell: "(String) A1..O24 gibi hücre etiketi; kullanılan grid yoğunluğuna göre son etiket değişir.",
                 x_ratio: "(Opsiyonel, Number) Hücre içinde soldan 0–1; varsayılan 0.5.",
                 y_ratio: "(Opsiyonel, Number) Hücre içinde yukarıdan 0–1; varsayılan 0.5.",
                 x: "(Number) JPEG üzerindeki kesin x pikseli; cell ile birlikte verilmez.",
