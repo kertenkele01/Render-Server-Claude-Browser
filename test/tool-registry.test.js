@@ -54,7 +54,7 @@ test('her araç şemasının bir komut karşılığı var', () => {
 
     // The documentation tool answers on the relay itself and never reaches a
     // device, so it is deliberately absent from the switch.
-    const relayHandled = new Set(['browser_get_tool_documentation']);
+    const relayHandled = new Set(['browser_get_tool_documentation', 'browser_list_devices']);
 
     assert.ok(declared.size > 15, `beklenenden az araç bulundu: ${declared.size}`);
 

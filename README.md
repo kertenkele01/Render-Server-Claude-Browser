@@ -28,6 +28,9 @@ yönlendirilmiyor.
 | `POST /api/v1/login` | Giriş yapar ve çağıran cihazı bağlar |
 | `POST /api/v1/logout` | Cihazın hesapla bağını koparır |
 | `GET /api/v1/account` | E-posta, plan, kota, cihaz/istemci sayısı |
+| `GET /api/v1/sync` | Hesabın cihazlarını ve geri yüklenebilir AI bağlantılarını birlikte döndürür |
+| `GET /api/v1/devices` | Yalnızca hesabın cihaz envanteri |
+| `GET /api/v1/clients` | Yalnızca hesabın AI bağlantı envanteri; düz metin token içermez |
 | `POST /api/v1/account/password` | Parola değiştirir |
 | `GET /api/v1/audit` | Hesabın denetim kaydı |
 
@@ -73,6 +76,21 @@ gerçek cihazın anahtarlarını silmek dahil.
 Sahipsiz cihazlar komut yönlendirmeye devam eder. Bu yükseltme yolu, açık kapı
 değil: yönlendirme hâlâ yalnızca gerçek telefonun üretebileceği bir istemci
 sırrı ister. Yalnızca kimsenin panelinde görünmezler.
+
+### Çoklu cihaz ve bağlantı senkronizasyonu
+
+Bir AI bağlantısının anahtarı değişmeden aynı hesaptaki birden fazla telefona
+bağlanabilir. Anahtarı üreten telefon varsayılan hedef olarak kalır; diğer
+telefon ancak aynı hesapta olup aynı `secretHash` değerini duyurursa bağlantıya
+katılır. İkincil telefon hash'i değiştiremez. Araç çağrısındaki `deviceId`
+yalnızca önceden yetkilendirilmiş bağlardan birini seçer ve hiçbir zaman yeni
+bir yetki vermez; hedef belirtilmezse sessiz bir yedek telefona geçilmez.
+
+`/api/v1/sync`, uygulamaya hesap cihazlarını ve bağlantı kimliği/hash bilgisini
+döndürür; düz metin token hiçbir zaman bu API'ye veya kalıcı röle deposuna
+girmez. Yeni telefon hash'i yerelde saklayarak mevcut token'ı doğrular ve
+izinleri güvenli varsayılanlarla başlatır. Çerezler ile web sitesi girişleri bu
+akışın parçası değildir ve cihazda kalır.
 
 ### Depolama
 

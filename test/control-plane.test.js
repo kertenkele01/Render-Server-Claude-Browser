@@ -83,7 +83,10 @@ async function webSignIn(email, password) {
     const jar = newJar();
     await visit(jar, '/register');
     const created = await form(jar, '/auth/register', { email, password });
-    assert.equal(created.status, 303, 'web kaydı başarısız');
+    // Helpers may reuse the same operator later in this file. A duplicate
+    // registration is deliberately a generic 400; the following real login is
+    // what proves the supplied account is usable.
+    assert.ok([303, 400].includes(created.status), 'web kaydı başarısız');
     await visit(jar, '/login');
     const logged = await form(jar, '/auth/login', { email, password });
     assert.equal(logged.status, 303, 'web girişi başarısız');
@@ -183,11 +186,11 @@ async function appSignUp(device, email, password) {
 }
 
 /** Runs one MCP command through the REST fallback. */
-function callTool(credential) {
+function callTool(credential, args = {}) {
     return fetch(`${BASE}/tools/browser_get_markdown`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
-        body: JSON.stringify({})
+        body: JSON.stringify(args)
     });
 }
 
@@ -372,6 +375,11 @@ test('bir hesap diğerinin verisini hiçbir uçtan göremez', async () => {
     assert.ok(mineAudit.body.events.every((e) => e.deviceId !== 'dev_izole_2'),
         'başka hesabın olayı denetim kaydında göründü');
 
+    const mineSync = await appApi(mine, 'GET', '/api/v1/sync');
+    assert.deepEqual(mineSync.body.devices.map((d) => d.deviceId), ['dev_izole_1']);
+    assert.ok(mineSync.body.clients.every((c) => !c.deviceIds.includes('dev_izole_2')),
+        'başka hesabın istemci bağı senkronizasyon görünümünde göründü');
+
     mine.close();
     theirs.close();
 });
@@ -404,6 +412,96 @@ test('istemci anahtarı çalışır, telefondan iptal edilince durur', async () 
     assert.equal(after.status, 401, 'iptal edilen anahtar hâlâ çalışıyor');
 
     device.close();
+});
+
+test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendirilebilir', async () => {
+    const secret = 'ortak-istemci-sirri-uzun-yeterince';
+    const clientId = 'cli_coklu_cihaz';
+    const email = 'coklu-cihaz@test.com';
+    const password = 'coklu-cihaz-parolasi-uzun';
+
+    const first = await connectDevice('dev_coklu_1', 'cihaz-sirri-coklu-bir', [
+        { clientId, secret, name: 'Ortak ChatGPT' }
+    ]);
+    await appSignUp(first, email, password);
+
+    // The free plan deliberately has one device. Promote this account through
+    // the real operator path so the test also proves account boundaries remain
+    // in force while a second phone is attached.
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const status = await (await visit(operator, '/api/status')).json();
+    const account = status.accounts.find((a) => a.email === email);
+    assert.ok(account, 'çoklu cihaz hesabı operatör görünümünde yok');
+    const promoted = await form(operator, '/admin/accounts/plan', {
+        accountId: account.id, plan: 'pro'
+    });
+    assert.equal(promoted.status, 303);
+
+    const second = await connectDevice('dev_coklu_2', 'cihaz-sirri-coklu-iki');
+    const login = await appApi(second, 'POST', '/api/v1/login', { email, password });
+    assert.equal(login.status, 200, `ikinci cihaz hesaba bağlanamadı: ${JSON.stringify(login.body)}`);
+
+    const syncBeforeRestore = await appApi(second, 'GET', '/api/v1/sync');
+    assert.equal(syncBeforeRestore.status, 200);
+    assert.deepEqual(
+        new Set(syncBeforeRestore.body.devices.map((d) => d.deviceId)),
+        new Set(['dev_coklu_1', 'dev_coklu_2'])
+    );
+    const restorable = syncBeforeRestore.body.clients.find((c) => c.clientId === clientId);
+    assert.ok(restorable, 'hesaptaki AI bağlantısı yeni telefona sunulmadı');
+    assert.equal(restorable.secretHash, sha256(secret));
+    assert.equal(restorable.secret, undefined, 'düz metin token senkronizasyon API’sine sızdı');
+    assert.deepEqual(restorable.deviceIds, ['dev_coklu_1']);
+
+    // A restored phone announces the same hash. The plaintext token is still
+    // never stored by the relay, and each phone verifies it independently.
+    second.send({
+        type: 'client_added',
+        clientId,
+        secretHash: sha256(secret),
+        name: 'Ortak ChatGPT'
+    });
+    await new Promise((r) => setTimeout(r, 250));
+
+    const token = `${clientId}.${secret}`;
+    const listedResponse = await fetch(`${BASE}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+            jsonrpc: '2.0', id: 77, method: 'tools/call',
+            params: { name: 'browser_list_devices', arguments: {} }
+        })
+    });
+    assert.equal(listedResponse.status, 200);
+    const listedRpc = await listedResponse.json();
+    const listed = JSON.parse(listedRpc.result.content[0].text);
+    assert.deepEqual(
+        new Set(listed.devices.map((d) => d.deviceId)),
+        new Set(['dev_coklu_1', 'dev_coklu_2'])
+    );
+    assert.equal(listed.devices.find((d) => d.deviceId === 'dev_coklu_1').isDefault, true);
+    assert.ok(listed.devices.every((d) => d.online), 'bağlı telefon çevrimdışı listelendi');
+
+    const defaultCall = await callTool(token);
+    assert.equal(defaultCall.status, 200);
+    assert.equal((await defaultCall.json()).data.deviceId, 'dev_coklu_1', 'mevcut varsayılan cihaz değişti');
+
+    const selectedCall = await callTool(token, { deviceId: 'dev_coklu_2' });
+    assert.equal(selectedCall.status, 200);
+    assert.equal((await selectedCall.json()).data.deviceId, 'dev_coklu_2', 'açık cihaz seçimi uygulanmadı');
+
+    const refused = await callTool(token, { deviceId: 'dev_hesap_disinda' });
+    assert.equal(refused.status, 502);
+    assert.match((await refused.json()).error, /yetkili değil/i);
+
+    second.send({ type: 'revoke_client', clientId });
+    const notice = await first.next('client_revoked');
+    assert.equal(notice.clientId, clientId, 'iptal diğer bağlı telefona ulaşmadı');
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal((await callTool(token)).status, 401, 'çoklu cihaz anahtarı iptalden sonra çalışıyor');
+
+    first.close();
+    second.close();
 });
 
 test('askıya alınan hesabın anahtarları anında durur', async () => {

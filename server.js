@@ -81,8 +81,9 @@ const pendingRequests = new Map(); // messageId -> { resolve, reject, timeout }
 //
 // The device is the authority: it mints every clientId/clientSecret and tells
 // us only the hash. We keep the hash so we can reject bad credentials early,
-// and the clientId -> deviceId binding so a command can never be routed to
-// somebody else's phone.
+// and explicit clientId -> authorised-device bindings so a command can never
+// be routed to somebody else's phone. The original phone remains the default;
+// another phone may join only under the same account with the same hash.
 //
 // These two Maps are a *read cache* over `lib/store.js`, not the truth. Every
 // MCP command calls `authenticate()`, and making that wait on a query would put
@@ -90,7 +91,7 @@ const pendingRequests = new Map(); // messageId -> { resolve, reject, timeout }
 // refresh the cache; the cache is rebuilt at boot.
 // ----------------------------------------------------
 const devices = new Map(); // deviceId -> { id, accountId, secretHash, name, ... }
-const clients = new Map(); // clientId -> { id, deviceId, accountId, secretHash, name }
+const clients = new Map(); // clientId -> { id, deviceId, deviceIds[], accountId, secretHash, name }
 
 let store = null;
 
@@ -267,6 +268,14 @@ const TOOLS = [
                     description: "Araç kategorisine göre filtreleme ('all', 'navigation', 'interaction', 'content_extraction', 'tabs_and_sessions', 'meta')" 
                 }
             }
+        }
+    },
+    {
+        name: "browser_list_devices",
+        description: "Bu AI bağlantısının kullanmasına izin verilmiş Android cihazlarını listeler. Her cihaz için cihaz kimliği, kullanıcıya görünen ad, çevrimiçi durum ve varsayılan hedef olup olmadığı döner. Birden fazla telefon varsa diğer browser_* araçlarında deviceId vermeden önce bunu çağırın. Bu araç yeni bir cihaza yetki vermez.",
+        inputSchema: {
+            type: "object",
+            properties: {}
         }
     },
     {
@@ -651,7 +660,7 @@ const TOOL_DOCUMENTATION = {
         },
         meta: {
             name: "Rehber & Dokümantasyon",
-            tools: ["browser_get_tool_documentation"]
+            tools: ["browser_get_tool_documentation", "browser_list_devices"]
         }
     },
     tools: {
@@ -664,6 +673,14 @@ const TOOL_DOCUMENTATION = {
                 category: "(Opsiyonel, String) Kategori filtresi ('navigation', 'interaction', 'content_extraction', 'tabs_and_sessions', 'meta', 'all')."
             },
             best_practice: "Yeni bir göreve başlarken hangi araçları nasıl kombine edeceğinizi planlamak veya parametre isimlerini doğrulamak için ilk olarak bu aracı çağırın."
+        },
+        browser_list_devices: {
+            name: "browser_list_devices",
+            category: "meta",
+            summary: "Bu AI bağlantısına bağlı Android cihazlarını ve çevrimiçi durumlarını listeler.",
+            parameters: {},
+            example_call: {},
+            best_practice: "Birden fazla cihaz bağlıysa önce bu aracı çağırın, sonra tarayıcı aracına dönen deviceId değerini verin. Varsayılan cihaz çevrimiçiyse deviceId vermeden çağrı yapmak mevcut davranışı korur."
         },
         browser_navigate: {
             name: "browser_navigate",
@@ -1023,8 +1040,9 @@ function generateDocumentationResponse(toolName = 'all', category = 'all') {
 // ----------------------------------------------------
 // CREDENTIALS
 // A credential is "<clientId>.<secret>". The clientId routes the call to the
-// one device that minted it; the secret is verified here against the stored
-// hash AND again on the device, which is the actual authority.
+// original/default phone or an explicitly selected bound phone. The secret is
+// verified here against the stored hash AND again on the destination device,
+// which remains the actual authority.
 // ----------------------------------------------------
 function parseCredential(raw) {
     const value = String(raw || '').trim();
@@ -1151,20 +1169,76 @@ async function enforceQuota(auth, refuse) {
     return true;
 }
 
-// Route a command to the one device this client is bound to. There is no
-// fallback to "some other connected device" — that would hand one user's AI
-// the controls of another user's phone.
-function routeCommandToBrowser(type, args, clientId, clientSecret) {
+function boundDeviceIds(record) {
+    const ids = Array.isArray(record && record.deviceIds) ? [...record.deviceIds] : [];
+    if (record && record.deviceId && !ids.includes(record.deviceId)) ids.unshift(record.deviceId);
+    return [...new Set(ids.filter(Boolean))];
+}
+
+function onlineBrowser(deviceId) {
+    const ws = browsers.get(deviceId);
+    if (ws && ws.readyState === 1) return ws;
+    if (ws) browsers.delete(deviceId);
+    return null;
+}
+
+function deviceChoiceLabel(deviceId) {
+    const record = devices.get(deviceId);
+    return record && record.name && record.name !== deviceId
+        ? `${record.name} (${deviceId})`
+        : deviceId;
+}
+
+/**
+ * Chooses only among bindings announced by real phones. `deviceId` selects a
+ * route; it never grants access, and the destination phone still verifies the
+ * client secret before touching its WebView.
+ */
+function selectBoundDevice(record, requestedDeviceId = null) {
+    const allowed = boundDeviceIds(record);
+    if (allowed.length === 0) {
+        throw new Error('Bu AI bağlantısına bağlı cihaz yok. Android uygulamasında bağlantıyı bir cihaza ekleyin.');
+    }
+
+    if (requestedDeviceId) {
+        if (!allowed.includes(requestedDeviceId)) {
+            throw new Error(`Cihaz '${requestedDeviceId}' bu AI bağlantısı için yetkili değil. Kullanılabilir cihazlar: ${allowed.map(deviceChoiceLabel).join(', ')}.`);
+        }
+        if (!onlineBrowser(requestedDeviceId)) {
+            throw new Error(`Seçilen cihaz (${deviceChoiceLabel(requestedDeviceId)}) çevrimdışı. Android uygulamasını açıp köprü bağlantısını etkinleştirin; tekrar denemek tek başına yardımcı olmaz.`);
+        }
+        return requestedDeviceId;
+    }
+
+    // The phone that minted the credential remains the default route, keeping
+    // every existing one-device setup unchanged.
+    if (record.deviceId && allowed.includes(record.deviceId) && onlineBrowser(record.deviceId)) {
+        return record.deviceId;
+    }
+
+    const online = allowed.filter((id) => !!onlineBrowser(id));
+    if (allowed.length === 1 || online.length === 0) {
+        throw new Error(`Eşleştirilmiş cihaz (${allowed.map(deviceChoiceLabel).join(', ')}) şu anda çevrimdışı. Android uygulamasının açık ve köprüye bağlı olduğundan emin olun.`);
+    }
+
+    // Never silently fail over to another phone. Routing is allowed to choose
+    // where a command goes, but that choice must remain visible to the owner.
+    throw new Error(`Varsayılan cihaz çevrimdışı. Çevrimiçi yetkili cihazlardan birini deviceId ile seçin: ${online.map(deviceChoiceLabel).join(', ')}.`);
+}
+
+function routeCommandToBrowser(type, args, clientId, clientSecret, requestedDeviceId = null) {
     return new Promise((resolve, reject) => {
         const record = clients.get(clientId);
         if (!record) return reject(new Error('İstemci kaydı bulunamadı. Lütfen cihazdan yeniden eşleştirin.'));
 
-        const deviceId = record.deviceId;
-        const ws = browsers.get(deviceId);
-        if (!ws || ws.readyState !== 1) {
-            browsers.delete(deviceId);
-            return reject(new Error(`Eşleştirilmiş cihaz (${deviceId}) şu anda çevrimdışı. Android uygulamasının açık ve köprüye bağlı olduğundan emin olun.`));
+        let deviceId;
+        try {
+            deviceId = selectBoundDevice(record, requestedDeviceId);
+        } catch (e) {
+            return reject(e);
         }
+        const ws = onlineBrowser(deviceId);
+        if (!ws) return reject(new Error(`Seçilen cihaz (${deviceChoiceLabel(deviceId)}) bağlantı kurulmadan hemen önce çevrimdışı oldu.`));
 
         const messageId = randomUUID();
         const payload = JSON.stringify({
@@ -1302,7 +1376,10 @@ wss.on('connection', (ws) => {
                         list.push({ id: cid, secretHash: hash, name: String(c.name || 'AI istemcisi').substring(0, 60) });
                     }
                 });
-                await store.replaceDeviceClients(id, list);
+                const reconciliation = await store.replaceDeviceClients(id, list);
+                if (reconciliation && reconciliation.conflicts && reconciliation.conflicts.length > 0) {
+                    console.warn(`[WS] Device '${id}' could not bind conflicting clients: ${reconciliation.conflicts.join(', ')}`);
+                }
             }
             await store.touchDevice(id, Date.now());
             await refreshRegistryCache();
@@ -1314,7 +1391,7 @@ wss.on('connection', (ws) => {
             browsers.set(id, ws);
 
             const record = devices.get(id);
-            const mine = [...clients.values()].filter((c) => c.deviceId === id).length;
+            const mine = [...clients.values()].filter((c) => boundDeviceIds(c).includes(id)).length;
             addLog(null, 'Android Uygulaması', id, 'Cihaz Bağlandı', 'success', `${mine} eşleştirilmiş istemci bildirildi.`);
             ws.send(JSON.stringify({
                 type: 'register_ack',
@@ -1340,12 +1417,23 @@ wss.on('connection', (ws) => {
             const cid = String(payload.clientId || '').trim();
             const hash = String(payload.secretHash || '').trim();
             if (!cid || !/^[a-f0-9]{64}$/i.test(hash)) return;
-            await store.upsertClient({
+            const stored = await store.upsertClient({
                 id: cid,
                 deviceId,
                 secretHash: hash,
                 name: String(payload.name || 'AI istemcisi').substring(0, 60)
             });
+            if (!stored) {
+                addLog(cid, payload.name, deviceId, 'İstemci Bağı Reddedildi', 'error', 'Kimlik başka hesaba ait veya anahtar özeti eşleşmiyor.');
+                try {
+                    ws.send(JSON.stringify({
+                        type: 'client_sync_rejected',
+                        clientId: cid,
+                        reason: 'Bu AI bağlantısı başka bir hesaba ait veya anahtarı eşleşmiyor.'
+                    }));
+                } catch (e) {}
+                return;
+            }
             await refreshRegistryCache();
             addLog(cid, payload.name, deviceId, 'İstemci Eklendi', 'success', 'Cihaz yeni bir erişim anahtarı üretti.');
             return;
@@ -1354,9 +1442,15 @@ wss.on('connection', (ws) => {
         if (payload.type === 'revoke_client') {
             const cid = String(payload.clientId || '').trim();
             const rec = clients.get(cid);
-            if (rec && rec.deviceId === deviceId) {
+            if (rec && boundDeviceIds(rec).includes(deviceId)) {
                 await store.deleteClient(cid);
-                clients.delete(cid);
+                await refreshRegistryCache();
+                boundDeviceIds(rec).forEach((id) => {
+                    const socket = browsers.get(id);
+                    if (socket && socket.readyState === 1 && socket !== ws) {
+                        try { socket.send(JSON.stringify({ type: 'client_revoked', clientId: cid })); } catch (e) {}
+                    }
+                });
                 addLog(cid, rec.name, deviceId, 'İstemci İptal Edildi', 'info', 'Kullanıcı erişimi kaldırdı.');
             }
             return;
@@ -1384,7 +1478,7 @@ wss.on('connection', (ws) => {
             // Verified against the registry, not taken on trust: a device may
             // only offer codes for clients that are its own, and only with the
             // secret that matches the hash it announced.
-            if (!record || record.deviceId !== deviceId || !safeEquals(sha256(secret), record.secretHash)) {
+            if (!record || !boundDeviceIds(record).includes(deviceId) || !safeEquals(sha256(secret), record.secretHash)) {
                 ws.send(JSON.stringify({
                     type: 'oauth_pairing_code',
                     status: 'rejected',
@@ -1658,7 +1752,9 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
         const toolName = params?.name;
         const args = params?.arguments || {};
 
-        // deviceId is ignored: the client is bound to exactly one device.
+        // `deviceId` chooses among bindings already announced by phones. It is
+        // routing metadata only and is never forwarded as an authority signal.
+        const requestedDeviceId = String(args.deviceId || '').trim() || null;
         const cleanArgs = { ...args };
         delete cleanArgs.deviceId;
 
@@ -1674,6 +1770,27 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
                 }
             ];
             reply({ content });
+            return 'handled';
+        }
+
+        if (toolName === "browser_list_devices") {
+            const deviceList = boundDeviceIds(auth.record).map((deviceId) => {
+                const device = devices.get(deviceId);
+                return {
+                    deviceId,
+                    name: device?.name || deviceId,
+                    online: !!onlineBrowser(deviceId),
+                    isDefault: deviceId === auth.record.deviceId,
+                    lastSeenAt: device?.lastSeenAt || null
+                };
+            });
+            addLog(auth.clientId, ctx.clientName, 'köprü', 'Cihazlar Listelendi', 'success', `${deviceList.length} yetkili cihaz`);
+            reply({
+                content: [{
+                    type: "text",
+                    text: JSON.stringify({ devices: deviceList }, null, 2)
+                }]
+            });
             return 'handled';
         }
 
@@ -1722,7 +1839,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
         }
 
         const clientName = ctx.clientName || 'AI istemcisi';
-        const boundDeviceId = auth.record.deviceId;
+        const boundDeviceId = requestedDeviceId || auth.record.deviceId;
 
         if (!(await enforceQuota(auth, (message) => {
             reply({ isError: true, content: [{ type: 'text', text: message }] });
@@ -1734,8 +1851,15 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
         try {
             addLog(auth.clientId, clientName, boundDeviceId, `Araç: ${toolName}`, 'pending', '');
             const startedAt = Date.now();
-            let responseData = await routeCommandToBrowser(actionType, cleanArgs, auth.clientId, auth.secret);
+            let responseData = await routeCommandToBrowser(
+                actionType,
+                cleanArgs,
+                auth.clientId,
+                auth.secret,
+                requestedDeviceId
+            );
             responseData = finalizeMarkdownResponse(toolName, responseData);
+            const actualDeviceId = responseData.deviceId || boundDeviceId;
 
             // Metadata only: size and host, never the content itself.
             const parts = [`${Date.now() - startedAt} ms`];
@@ -1744,7 +1868,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             if (typeof responseData.byte_size === 'number') parts.push(`${Math.round(responseData.byte_size / 1024)} KB görüntü`);
             const host = hostOf(responseData.url);
             if (host) parts.push(host);
-            addLog(auth.clientId, clientName, boundDeviceId, `Tamamlandı: ${toolName}`, 'success', parts.join(' · '));
+            addLog(auth.clientId, clientName, actualDeviceId, `Tamamlandı: ${toolName}`, 'success', parts.join(' · '));
 
             // An image comes back as an MCP image block, not as base64 buried in
             // a JSON string: the client has to be able to actually look at it.
@@ -1939,11 +2063,12 @@ const directToolHandler = async (type, req, res) => {
     if (!auth) return;
 
     const args = (req.method === 'POST' ? req.body : req.query) || {};
+    const requestedDeviceId = String(args.deviceId || '').trim() || null;
     const cleanArgs = { ...args };
     delete cleanArgs.deviceId;
 
     const clientName = auth.record.name;
-    const deviceId = auth.record.deviceId;
+    const deviceId = requestedDeviceId || auth.record.deviceId;
 
     let quotaMessage = null;
     if (!(await enforceQuota(auth, (message) => { quotaMessage = message; }))) {
@@ -1953,9 +2078,15 @@ const directToolHandler = async (type, req, res) => {
 
     try {
         addLog(auth.clientId, clientName, deviceId, `REST: ${type}`, 'pending', '');
-        let responseData = await routeCommandToBrowser(type, cleanArgs, auth.clientId, auth.secret);
+        let responseData = await routeCommandToBrowser(
+            type,
+            cleanArgs,
+            auth.clientId,
+            auth.secret,
+            requestedDeviceId
+        );
         responseData = finalizeMarkdownResponse(type, responseData);
-        addLog(auth.clientId, clientName, deviceId, `REST tamam: ${type}`, 'success', hostOf(responseData.url));
+        addLog(auth.clientId, clientName, responseData.deviceId || deviceId, `REST tamam: ${type}`, 'success', hostOf(responseData.url));
         return res.json({ status: "success", data: responseData });
     } catch (error) {
         addLog(auth.clientId, clientName, deviceId, `REST hata: ${type}`, 'error', error?.name || 'Araç hatası');
@@ -2415,11 +2546,13 @@ app.post('/oauth/revoke', async (req, res) => {
 
     // Fail-closed either way, but tell the phone so its client list does not
     // disagree with what the relay will honour.
-    const socket = browsers.get(record.deviceId);
-    if (socket && socket.readyState === 1) {
-        try { socket.send(JSON.stringify({ type: 'client_revoked', clientId })); } catch (e) {}
-    }
-    dropPairingsForDevice(record.deviceId);
+    boundDeviceIds(record).forEach((deviceId) => {
+        const socket = browsers.get(deviceId);
+        if (socket && socket.readyState === 1) {
+            try { socket.send(JSON.stringify({ type: 'client_revoked', clientId })); } catch (e) {}
+        }
+        dropPairingsForDevice(deviceId);
+    });
 
     addLog(clientId, record.name, record.deviceId, 'OAuth İptal', 'info', 'İstemci kendi erişimini iptal etti.');
     return res.status(200).end();
@@ -2628,6 +2761,67 @@ app.get('/api/v1/account', async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;
     res.json(await accountSnapshot(device));
+});
+
+/**
+ * The account-owned inventory used by the Android app's device-sync screen.
+ *
+ * A client hash is intentionally included: another phone on the same account
+ * needs it to verify the existing plaintext credential after the owner opts in
+ * to restoring that connection. The hash cannot authenticate an MCP request,
+ * and the relay still never stores or returns the plaintext secret.
+ */
+async function accountSyncSnapshot(device) {
+    const [ownedDevices, ownedClients] = await Promise.all([
+        store.listDevices(device.accountId),
+        store.listClients(device.accountId)
+    ]);
+    return {
+        devices: ownedDevices.map((row) => ({
+            deviceId: row.id,
+            name: row.name || row.id,
+            createdAt: row.createdAt || 0,
+            lastSeenAt: row.lastSeenAt || 0,
+            online: browsers.has(row.id),
+            isCurrent: row.id === device.id
+        })),
+        clients: ownedClients.map((row) => ({
+            clientId: row.id,
+            name: row.name || 'AI istemcisi',
+            secretHash: row.secretHash,
+            createdAt: row.createdAt || 0,
+            defaultDeviceId: row.deviceId,
+            deviceIds: Array.isArray(row.deviceIds) ? row.deviceIds : [row.deviceId].filter(Boolean)
+        }))
+    };
+}
+
+async function requireAccountSync(req, res) {
+    const device = requireDevice(req, res);
+    if (!device) return null;
+    if (!device.accountId) {
+        res.status(403).json({
+            error: 'not_linked',
+            message: 'Cihazlar arası senkronizasyon için önce hesabınıza giriş yapın.'
+        });
+        return null;
+    }
+    return accountSyncSnapshot(device);
+}
+
+app.get('/api/v1/sync', async (req, res) => {
+    const snapshot = await requireAccountSync(req, res);
+    if (snapshot) res.json(snapshot);
+});
+
+app.get('/api/v1/devices', async (req, res) => {
+    const snapshot = await requireAccountSync(req, res);
+    if (snapshot) res.json({ devices: snapshot.devices });
+});
+
+app.get('/api/v1/clients', async (req, res) => {
+    const snapshot = await requireAccountSync(req, res);
+    if (snapshot) res.json({ clients: snapshot.clients });
 });
 
 app.post('/api/v1/logout', async (req, res) => {
@@ -3067,11 +3261,13 @@ app.post('/clients/revoke', async (req, res) => {
         }
     });
 
-    // Tell the phone so its own client list matches what the panel just did.
-    const ws = browsers.get(record.deviceId);
-    if (ws && ws.readyState === 1) {
-        try { ws.send(JSON.stringify({ type: 'client_revoked', clientId })); } catch (e) {}
-    }
+    // Tell every bound phone so none keeps accepting the revoked credential.
+    boundDeviceIds(record).forEach((deviceId) => {
+        const ws = browsers.get(deviceId);
+        if (ws && ws.readyState === 1) {
+            try { ws.send(JSON.stringify({ type: 'client_revoked', clientId })); } catch (e) {}
+        }
+    });
 
     addLog(clientId, record.name, record.deviceId, 'İstemci İptal Edildi', 'info', 'Panelden iptal edildi.');
     res.redirect(303, '/?ok=' + encodeURIComponent('İstemci erişimi iptal edildi.'));
