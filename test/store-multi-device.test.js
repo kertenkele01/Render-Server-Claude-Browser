@@ -72,11 +72,23 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
         assert.equal(handedOff.deviceId, 'dev_store_2', 'çıkan kaynak cihaz varsayılan kalmaya devam etti');
         assert.equal(handedOff.accountId, account.id, 'kalan cihazın hesap bağı kayboldu');
         assert.deepEqual(handedOff.deviceIds, ['dev_store_2']);
+        await store.upsertCookieSnapshot({
+            clientId: 'cli_store_multi',
+            accountId: account.id,
+            sourceDeviceId: 'dev_store_2',
+            version: 1,
+            iv: 'c2FrbGFuYW4taXY=',
+            ciphertext: 'c2FrbGFuYW4tc2lmcmVsaS1jZXJleg==',
+            updatedAt: 12345
+        });
         await store.close();
         store = null;
 
         const restored = await openStore({ stateFile, databaseUrl: '' });
         assert.deepEqual((await restored.getClient('cli_store_multi')).deviceIds, ['dev_store_2']);
+        const cookieSnapshot = await restored.getCookieSnapshot(account.id, 'cli_store_multi');
+        assert.equal(cookieSnapshot.ciphertext, 'c2FrbGFuYW4tc2lmcmVsaS1jZXJleg==');
+        assert.equal(await restored.getCookieSnapshot('baska-hesap', 'cli_store_multi'), null);
         await restored.close();
     } finally {
         if (store) await store.close();

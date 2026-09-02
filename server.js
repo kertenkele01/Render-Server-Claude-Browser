@@ -2772,10 +2772,12 @@ app.get('/api/v1/account', async (req, res) => {
  * and the relay still never stores or returns the plaintext secret.
  */
 async function accountSyncSnapshot(device) {
-    const [ownedDevices, ownedClients] = await Promise.all([
+    const [ownedDevices, ownedClients, cookieSnapshots] = await Promise.all([
         store.listDevices(device.accountId),
-        store.listClients(device.accountId)
+        store.listClients(device.accountId),
+        store.listCookieSnapshots(device.accountId)
     ]);
+    const cookiesByClient = new Map(cookieSnapshots.map((row) => [row.clientId, row]));
     return {
         devices: ownedDevices.map((row) => ({
             deviceId: row.id,
@@ -2785,14 +2787,23 @@ async function accountSyncSnapshot(device) {
             online: browsers.has(row.id),
             isCurrent: row.id === device.id
         })),
-        clients: ownedClients.map((row) => ({
-            clientId: row.id,
-            name: row.name || 'AI istemcisi',
-            secretHash: row.secretHash,
-            createdAt: row.createdAt || 0,
-            defaultDeviceId: row.deviceId,
-            deviceIds: Array.isArray(row.deviceIds) ? row.deviceIds : [row.deviceId].filter(Boolean)
-        }))
+        clients: ownedClients.map((row) => {
+            const encrypted = cookiesByClient.get(row.id);
+            return {
+                clientId: row.id,
+                name: row.name || 'AI istemcisi',
+                secretHash: row.secretHash,
+                createdAt: row.createdAt || 0,
+                defaultDeviceId: row.deviceId,
+                deviceIds: Array.isArray(row.deviceIds) ? row.deviceIds : [row.deviceId].filter(Boolean),
+                cookieSnapshot: encrypted ? {
+                    version: encrypted.version,
+                    iv: encrypted.iv,
+                    ciphertext: encrypted.ciphertext,
+                    updatedAt: encrypted.updatedAt
+                } : null
+            };
+        })
     };
 }
 
@@ -2812,6 +2823,56 @@ async function requireAccountSync(req, res) {
 app.get('/api/v1/sync', async (req, res) => {
     const snapshot = await requireAccountSync(req, res);
     if (snapshot) res.json(snapshot);
+});
+
+/**
+ * Stores one opaque cookie package. Only the phone that originally minted the
+ * AI credential may replace it; a restored phone can download it but cannot
+ * silently become the source of truth.
+ */
+app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) {
+        return res.status(403).json({
+            error: 'not_linked',
+            message: 'Çerez eşitlemek için önce hesabınıza giriş yapın.'
+        });
+    }
+
+    const clientId = String(req.params.clientId || '');
+    const client = await store.getClient(clientId);
+    if (!client || client.accountId !== device.accountId) {
+        return res.status(404).json({ error: 'not_found', message: 'Bu AI oturumu hesabınızda bulunamadı.' });
+    }
+    if (client.deviceId !== device.id) {
+        return res.status(403).json({
+            error: 'not_origin_device',
+            message: 'Çerez paketini yalnızca bu AI bağlantısını oluşturan cihaz güncelleyebilir.'
+        });
+    }
+
+    const version = Number(req.body && req.body.version);
+    const iv = String((req.body && req.body.iv) || '');
+    const ciphertext = String((req.body && req.body.ciphertext) || '');
+    const base64 = /^[A-Za-z0-9+/]+={0,2}$/;
+    if (version !== 1 || iv.length < 16 || iv.length > 64 || !base64.test(iv)) {
+        return res.status(400).json({ error: 'invalid_snapshot', message: 'Şifreli çerez paketinin sürümü veya IV alanı geçersiz.' });
+    }
+    if (ciphertext.length < 24 || ciphertext.length > 350_000 || !base64.test(ciphertext)) {
+        return res.status(413).json({ error: 'invalid_snapshot', message: 'Şifreli çerez paketi geçersiz veya çok büyük.' });
+    }
+
+    const stored = await store.upsertCookieSnapshot({
+        clientId,
+        accountId: device.accountId,
+        sourceDeviceId: device.id,
+        version,
+        iv,
+        ciphertext,
+        updatedAt: Date.now()
+    });
+    res.json({ status: 'ok', clientId, version: stored.version, updatedAt: stored.updatedAt });
 });
 
 app.get('/api/v1/devices', async (req, res) => {

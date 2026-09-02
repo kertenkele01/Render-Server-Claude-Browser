@@ -425,6 +425,14 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     ]);
     await appSignUp(first, email, password);
 
+    const encryptedCookiePackage = Buffer.from('yalnizca-cihazda-cozulebilen-paket').toString('base64');
+    const uploadedCookies = await appApi(first, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
+        version: 1,
+        iv: Buffer.from('on-iki-byte-iv').toString('base64'),
+        ciphertext: encryptedCookiePackage
+    });
+    assert.equal(uploadedCookies.status, 200, JSON.stringify(uploadedCookies.body));
+
     // The free plan deliberately has one device. Promote this account through
     // the real operator path so the test also proves account boundaries remain
     // in force while a second phone is attached.
@@ -452,6 +460,17 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     assert.equal(restorable.secretHash, sha256(secret));
     assert.equal(restorable.secret, undefined, 'düz metin token senkronizasyon API’sine sızdı');
     assert.deepEqual(restorable.deviceIds, ['dev_coklu_1']);
+    assert.equal(restorable.cookieSnapshot.version, 1);
+    assert.equal(restorable.cookieSnapshot.ciphertext, encryptedCookiePackage);
+    assert.equal(JSON.stringify(restorable).includes('yalnizca-cihazda'), false,
+        'çerez paketinin düz metni senkronizasyon görünümüne sızdı');
+
+    const secondaryUpload = await appApi(second, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
+        version: 1,
+        iv: Buffer.from('on-iki-byte-iv').toString('base64'),
+        ciphertext: Buffer.from('ikincil-cihaz-paketi-yazamamali').toString('base64')
+    });
+    assert.equal(secondaryUpload.status, 403, 'ikincil cihaz kaynak çerez paketini değiştirebildi');
 
     // A restored phone announces the same hash. The plaintext token is still
     // never stored by the relay, and each phone verifies it independently.
