@@ -46,6 +46,16 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
         });
         assert.equal(conflict, null, 'ikincil cihaz ortak anahtarın hashini değiştirdi');
 
+        await store.setClientCookieSyncEnabled('cli_store_multi', account.id, true);
+        await store.setDeviceCookieSyncEnabled('cli_store_multi', 'dev_store_1', account.id, true);
+        await store.setDeviceCookieSyncEnabled('cli_store_multi', 'dev_store_2', account.id, true);
+        await store.setDeviceCookieSyncEnabled('cli_store_multi', 'dev_store_1', account.id, false);
+        assert.equal(
+            (await store.getClient('cli_store_multi')).deviceId,
+            'dev_store_2',
+            'çerez eşitlemesi kapanan yazıcıdan diğer etkin cihaza devredilmedi'
+        );
+
         await store.replaceDeviceClients('dev_store_2', []);
         assert.deepEqual((await store.getClient('cli_store_multi')).deviceIds, ['dev_store_1']);
 
@@ -72,6 +82,22 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
         assert.equal(handedOff.deviceId, 'dev_store_2', 'çıkan kaynak cihaz varsayılan kalmaya devam etti');
         assert.equal(handedOff.accountId, account.id, 'kalan cihazın hesap bağı kayboldu');
         assert.deepEqual(handedOff.deviceIds, ['dev_store_2']);
+
+        const otherAccount = await store.createAccount({
+            email: 'store-other@test.com', passwordHash: 'hash2', passwordSalt: 'salt2'
+        });
+        await store.upsertDevice({ id: 'dev_store_3', secretHash: 'd3', name: 'Paylaşılan telefon' });
+        await store.setDeviceAccount('dev_store_3', account.id);
+        await store.upsertClient({
+            id: 'cli_eski_hesap', deviceId: 'dev_store_3', secretHash: 'c'.repeat(64), name: 'Eski hesap AI'
+        });
+        await store.setDeviceAccount('dev_store_3', null);
+        await store.setDeviceAccount('dev_store_3', otherAccount.id);
+        assert.equal(
+            (await store.getClient('cli_eski_hesap')).accountId,
+            account.id,
+            'çıkıştan sonra eski AI bağlantısı yeni hesaba taşındı'
+        );
         await store.upsertCookieSnapshot({
             clientId: 'cli_store_multi',
             accountId: account.id,
@@ -86,6 +112,9 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
 
         const restored = await openStore({ stateFile, databaseUrl: '' });
         assert.deepEqual((await restored.getClient('cli_store_multi')).deviceIds, ['dev_store_2']);
+        const preservedCloudClient = await restored.getClient('cli_eski_hesap');
+        assert.equal(preservedCloudClient.accountId, account.id);
+        assert.deepEqual(preservedCloudClient.deviceIds, [], 'hesaptan çıkarılan telefon yeniden bağlandı');
         const cookieSnapshot = await restored.getCookieSnapshot(account.id, 'cli_store_multi');
         assert.equal(cookieSnapshot.ciphertext, 'c2FrbGFuYW4tc2lmcmVsaS1jZXJleg==');
         assert.equal(await restored.getCookieSnapshot('baska-hesap', 'cli_store_multi'), null);

@@ -335,15 +335,32 @@ test('parola uygulamadan değiştirilebilir', async () => {
     const device = await connectDevice('dev_parola', 'cihaz-sirri-16-karakter');
     await appSignUp(device, 'parola@test.com', 'cok-guclu-parola-6');
 
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const status = await (await visit(operator, '/api/status')).json();
+    const passwordAccount = status.accounts.find((a) => a.email === 'parola@test.com');
+    assert.ok(passwordAccount);
+    assert.equal((await form(operator, '/admin/accounts/plan', {
+        accountId: passwordAccount.id, plan: 'pro'
+    })).status, 303);
+
+    const otherDevice = await connectDevice('dev_parola_2', 'cihaz-sirri-parola-iki');
+    assert.equal((await appApi(otherDevice, 'POST', '/api/v1/login', {
+        email: 'parola@test.com', password: 'cok-guclu-parola-6'
+    })).status, 200);
+
     const wrong = await appApi(device, 'POST', '/api/v1/account/password', {
         current: 'yanlis-parola', next: 'yeni-parola-yeterince-uzun'
     });
     assert.equal(wrong.status, 401);
 
     const ok = await appApi(device, 'POST', '/api/v1/account/password', {
-        current: 'cok-guclu-parola-6', next: 'yeni-parola-yeterince-uzun'
+        current: 'cok-guclu-parola-6', next: 'yeni-parola-yeterince-uzun', logoutOtherDevices: true
     });
     assert.equal(ok.status, 200);
+
+    const otherAfterChange = await appApi(otherDevice, 'GET', '/api/v1/account');
+    assert.equal(otherAfterChange.status, 200);
+    assert.equal(otherAfterChange.body.linked, false, 'parola değişiminden sonra diğer cihaz bağlı kaldı');
 
     await appApi(device, 'POST', '/api/v1/logout');
     const relog = await appApi(device, 'POST', '/api/v1/login', {
@@ -352,6 +369,7 @@ test('parola uygulamadan değiştirilebilir', async () => {
     assert.equal(relog.status, 200);
 
     device.close();
+    otherDevice.close();
 });
 
 // --- isolation -------------------------------------------------------------
@@ -424,6 +442,9 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
         { clientId, secret, name: 'Ortak ChatGPT' }
     ]);
     await appSignUp(first, email, password);
+
+    const enabledCookies = await appApi(first, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`);
+    assert.equal(enabledCookies.status, 200, JSON.stringify(enabledCookies.body));
 
     const encryptedCookiePackage = Buffer.from('yalnizca-cihazda-cozulebilen-paket').toString('base64');
     const uploadedCookies = await appApi(first, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
@@ -513,14 +534,34 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     assert.equal(refused.status, 502);
     assert.match((await refused.json()).error, /yetkili değil/i);
 
-    second.send({ type: 'revoke_client', clientId });
-    const notice = await first.next('client_revoked');
-    assert.equal(notice.clientId, clientId, 'iptal diğer bağlı telefona ulaşmadı');
+    const deletedCloudCookies = await appApi(second, 'DELETE', `/api/v1/sync/clients/${clientId}/cookies`);
+    assert.equal(deletedCloudCookies.status, 200);
+    const uploadWhileDisabled = await appApi(first, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
+        version: 1,
+        iv: Buffer.from('on-iki-byte-iv').toString('base64'),
+        ciphertext: encryptedCookiePackage
+    });
+    assert.equal(uploadWhileDisabled.status, 409, 'silinen bulut kopyası kaynak telefon tarafından kendiliğinden geri oluşturuldu');
+    assert.equal((await appApi(first, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`)).status, 200);
+
+    const removedSecondary = await appApi(first, 'DELETE', '/api/v1/devices/dev_coklu_2');
+    assert.equal(removedSecondary.status, 200, JSON.stringify(removedSecondary.body));
+    const afterDeviceRemoval = await appApi(first, 'GET', '/api/v1/sync');
+    assert.deepEqual(afterDeviceRemoval.body.devices.map((d) => d.deviceId), ['dev_coklu_1']);
+    const reconnectRemoved = await connectDevice('dev_coklu_2', 'cihaz-sirri-coklu-iki', [
+        { clientId, secret, name: 'Ortak ChatGPT' }
+    ]);
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal((await callTool(token, { deviceId: 'dev_coklu_2' })).status, 502,
+        'hesaptan çıkarılan telefon yeniden bağlanabildi');
+
+    first.send({ type: 'revoke_client', clientId });
     await new Promise((r) => setTimeout(r, 100));
     assert.equal((await callTool(token)).status, 401, 'çoklu cihaz anahtarı iptalden sonra çalışıyor');
 
     first.close();
     second.close();
+    reconnectRemoved.close();
 });
 
 test('askıya alınan hesabın anahtarları anında durur', async () => {

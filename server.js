@@ -1171,7 +1171,6 @@ async function enforceQuota(auth, refuse) {
 
 function boundDeviceIds(record) {
     const ids = Array.isArray(record && record.deviceIds) ? [...record.deviceIds] : [];
-    if (record && record.deviceId && !ids.includes(record.deviceId)) ids.unshift(record.deviceId);
     return [...new Set(ids.filter(Boolean))];
 }
 
@@ -2632,6 +2631,7 @@ async function accountSnapshot(device) {
     ]);
     return {
         linked: true,
+        accountId: account.id,
         deviceId: device.id,
         deviceName: device.name,
         email: account.email,
@@ -2796,11 +2796,13 @@ async function accountSyncSnapshot(device) {
                 createdAt: row.createdAt || 0,
                 defaultDeviceId: row.deviceId,
                 deviceIds: Array.isArray(row.deviceIds) ? row.deviceIds : [row.deviceId].filter(Boolean),
+                cookieSyncEnabled: !!row.cookieSyncEnabled,
                 cookieSnapshot: encrypted ? {
                     version: encrypted.version,
                     iv: encrypted.iv,
                     ciphertext: encrypted.ciphertext,
-                    updatedAt: encrypted.updatedAt
+                    updatedAt: encrypted.updatedAt,
+                    lastWriterDeviceId: encrypted.sourceDeviceId || ''
                 } : null
             };
         })
@@ -2826,9 +2828,9 @@ app.get('/api/v1/sync', async (req, res) => {
 });
 
 /**
- * Stores one opaque cookie package. Only the phone that originally minted the
- * AI credential may replace it; a restored phone can download it but cannot
- * silently become the source of truth.
+ * Stores one opaque cookie package. Only the current origin/default device may
+ * replace it. Other account devices continuously read the package but never
+ * race to overwrite one another.
  */
 app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
     const device = requireDevice(req, res);
@@ -2848,7 +2850,13 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
     if (client.deviceId !== device.id) {
         return res.status(403).json({
             error: 'not_origin_device',
-            message: 'Çerez paketini yalnızca bu AI bağlantısını oluşturan cihaz güncelleyebilir.'
+            message: 'Çerez paketini yalnızca hesabın bu bağlantı için seçtiği kaynak cihaz güncelleyebilir.'
+        });
+    }
+    if (!client.cookieSyncEnabled) {
+        return res.status(409).json({
+            error: 'cookie_sync_disabled',
+            message: 'Bu AI oturumu için bulut çerez eşitlemesi kapalı. Önce uygulamadan yeniden açın.'
         });
     }
 
@@ -2875,9 +2883,84 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
     res.json({ status: 'ok', clientId, version: stored.version, updatedAt: stored.updatedAt });
 });
 
+app.delete('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) {
+        return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    }
+    const clientId = String(req.params.clientId || '');
+    const client = await store.getClient(clientId);
+    if (!client || client.accountId !== device.accountId) {
+        return res.status(404).json({ error: 'not_found', message: 'Bu AI oturumu hesabınızda bulunamadı.' });
+    }
+    await store.setClientCookieSyncEnabled(clientId, device.accountId, false);
+    await refreshRegistryCache();
+    res.json({ status: 'ok', clientId });
+});
+
+app.post('/api/v1/sync/clients/:clientId/cookies/enable', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) {
+        return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    }
+    const clientId = String(req.params.clientId || '');
+    const client = await store.getClient(clientId);
+    if (!client || client.accountId !== device.accountId || !boundDeviceIds(client).includes(device.id)) {
+        return res.status(404).json({ error: 'not_found', message: 'Bu AI oturumu bu telefona bağlı değil.' });
+    }
+    await store.setClientCookieSyncEnabled(clientId, device.accountId, true);
+    await store.setDeviceCookieSyncEnabled(clientId, device.id, device.accountId, true);
+    await refreshRegistryCache();
+    res.json({ status: 'ok', clientId });
+});
+
+app.post('/api/v1/sync/clients/:clientId/cookies/disable-device', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) {
+        return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    }
+    const clientId = String(req.params.clientId || '');
+    const changed = await store.setDeviceCookieSyncEnabled(clientId, device.id, device.accountId, false);
+    if (!changed) {
+        return res.status(404).json({ error: 'not_found', message: 'Bu AI oturumu bu telefona bağlı değil.' });
+    }
+    await refreshRegistryCache();
+    res.json({ status: 'ok', clientId });
+});
+
 app.get('/api/v1/devices', async (req, res) => {
     const snapshot = await requireAccountSync(req, res);
     if (snapshot) res.json({ devices: snapshot.devices });
+});
+
+app.delete('/api/v1/devices/:deviceId', async (req, res) => {
+    const current = requireDevice(req, res);
+    if (!current) return;
+    if (!current.accountId) {
+        return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    }
+    const targetId = String(req.params.deviceId || '');
+    if (!targetId || targetId === current.id) {
+        return res.status(400).json({
+            error: 'invalid_device',
+            message: 'Bu telefonu buradan kaldıramazsınız; çıkış düğmesini kullanın.'
+        });
+    }
+    const target = await store.getDevice(targetId);
+    if (!target || target.accountId !== current.accountId) {
+        return res.status(404).json({ error: 'not_found', message: 'Cihaz hesabınızda bulunamadı.' });
+    }
+    // Capture account ownership before unlinking; afterwards accountIdFor()
+    // correctly sees an unclaimed device and the event would have no owner.
+    addLog(null, 'Uygulama', targetId, 'Cihaz Kaldırıldı', 'warning', 'Hesap sahibi cihazın bağını uzaktan kaldırdı.');
+    await store.setDeviceAccount(targetId, null);
+    await refreshRegistryCache();
+    const socket = browsers.get(targetId);
+    if (socket) try { socket.close(4403, 'Cihaz hesap sahibi tarafından kaldırıldı'); } catch (e) {}
+    res.json({ status: 'ok', deviceId: targetId });
 });
 
 app.get('/api/v1/clients', async (req, res) => {
@@ -2890,9 +2973,9 @@ app.post('/api/v1/logout', async (req, res) => {
     if (!device) return;
     if (!device.accountId) return res.json({ linked: false, deviceId: device.id });
 
+    addLog(null, 'Uygulama', device.id, 'Cihaz Bağı Koparıldı', 'info', 'Kullanıcı uygulamadan çıkış yaptı.');
     await store.setDeviceAccount(device.id, null);
     await refreshRegistryCache();
-    addLog(null, 'Uygulama', device.id, 'Cihaz Bağı Koparıldı', 'info', 'Kullanıcı uygulamadan çıkış yaptı.');
     res.json({ linked: false, deviceId: device.id });
 });
 
@@ -2916,6 +2999,16 @@ app.post('/api/v1/account/password', async (req, res) => {
     const { passwordHash, passwordSalt } = await accounts.hashPassword(next);
     await store.setAccountPassword(account.id, passwordHash, passwordSalt);
     await store.revokeAccountSessions(account.id);
+    if (req.body && req.body.logoutOtherDevices === true) {
+        const accountDevices = await store.listDevices(account.id);
+        for (const other of accountDevices) {
+            if (other.id === device.id) continue;
+            addLog(null, 'Uygulama', other.id, 'Cihaz Bağı Koparıldı', 'warning', 'Parola değiştirildi; diğer cihazın hesap bağlantısı kapatıldı.');
+            await store.setDeviceAccount(other.id, null);
+            const socket = browsers.get(other.id);
+            if (socket) try { socket.close(4403, 'Parola değiştirildi; diğer cihazların oturumu kapatıldı'); } catch (e) {}
+        }
+    }
     await refreshRegistryCache();
     res.json({ status: 'ok', message: 'Parola değişti.' });
 });
@@ -3287,9 +3380,9 @@ app.post('/devices/release', async (req, res) => {
         return res.redirect(303, '/?err=' + encodeURIComponent('Bu cihaz sizin hesabınıza bağlı değil.'));
     }
 
+    addLog(null, 'Panel', deviceId, 'Cihaz Bağı Koparıldı', 'info', 'Cihaz hesaptan ayrıldı.');
     await store.setDeviceAccount(deviceId, null);
     await refreshRegistryCache();
-    addLog(null, 'Panel', deviceId, 'Cihaz Bağı Koparıldı', 'info', 'Cihaz hesaptan ayrıldı.');
 
     const ws = browsers.get(deviceId);
     if (ws && ws.readyState === 1) {
