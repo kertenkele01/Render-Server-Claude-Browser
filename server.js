@@ -2634,6 +2634,7 @@ async function accountSnapshot(device) {
         accountId: account.id,
         deviceId: device.id,
         deviceName: device.name,
+        syncEnabled: device.syncEnabled === true,
         email: account.email,
         status: account.status,
         plan: { id: account.plan, label: plan.label },
@@ -2778,6 +2779,16 @@ async function accountSyncSnapshot(device) {
         store.listCookieSnapshots(device.accountId)
     ]);
     const cookiesByClient = new Map(cookieSnapshots.map((row) => [row.clientId, row]));
+    const syncingDeviceIds = new Set(
+        ownedDevices.filter((row) => row.syncEnabled === true).map((row) => row.id)
+    );
+    // A device may belong to the account while remaining local-only. Its
+    // sessions must still route through the relay, but they are not offered to
+    // the account's other phones until the owner opts in.
+    const syncedClients = ownedClients.filter((row) => {
+        const ids = Array.isArray(row.deviceIds) ? row.deviceIds : [row.deviceId].filter(Boolean);
+        return ids.some((id) => syncingDeviceIds.has(id));
+    });
     return {
         devices: ownedDevices.map((row) => ({
             deviceId: row.id,
@@ -2785,9 +2796,10 @@ async function accountSyncSnapshot(device) {
             createdAt: row.createdAt || 0,
             lastSeenAt: row.lastSeenAt || 0,
             online: browsers.has(row.id),
-            isCurrent: row.id === device.id
+            isCurrent: row.id === device.id,
+            syncEnabled: row.syncEnabled === true
         })),
-        clients: ownedClients.map((row) => {
+        clients: syncedClients.map((row) => {
             const encrypted = cookiesByClient.get(row.id);
             return {
                 clientId: row.id,
@@ -2828,6 +2840,81 @@ app.get('/api/v1/sync', async (req, res) => {
 });
 
 /**
+ * Changes this phone's account-wide sync participation. Signing in and
+ * syncing are deliberately separate decisions: local-only clients still
+ * route, but never appear in another phone's restore inventory.
+ */
+app.post('/api/v1/sync/device-mode', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) {
+        return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    }
+    const enabled = req.body && req.body.enabled === true;
+    await store.setDeviceSyncEnabled(device.id, device.accountId, enabled);
+    await refreshRegistryCache();
+    const current = devices.get(device.id);
+    res.json({ status: 'ok', syncEnabled: enabled, ...(await accountSyncSnapshot(current)) });
+});
+
+/**
+ * Resolves the only destructive transition: a phone that was local-only is
+ * joining an account which already has cloud sessions. The decision is made
+ * explicitly on the phone; the relay only applies that selected direction.
+ */
+app.post('/api/v1/sync/resolve', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) {
+        return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    }
+    const strategy = String((req.body && req.body.strategy) || '');
+    if (strategy !== 'cloud' && strategy !== 'device') {
+        return res.status(400).json({ error: 'invalid_strategy', message: 'Geçerli bir senkronizasyon yönü seçin.' });
+    }
+
+    const accountId = device.accountId;
+    if (strategy === 'cloud') {
+        // Removing the device binding first promotes an existing account phone
+        // to writer. Connections that existed only on this phone are then true
+        // orphans and are discarded before the cloud snapshot is returned.
+        await store.setDeviceAccount(device.id, null);
+        await store.setDeviceAccount(device.id, accountId);
+        const afterDetach = await store.listClients(accountId);
+        for (const client of afterDetach) {
+            const ids = Array.isArray(client.deviceIds) ? client.deviceIds : [];
+            if (ids.length === 0) await store.deleteClient(client.id);
+        }
+    } else {
+        // The phone is authoritative: remove every account connection that is
+        // not present on it. Shared identities survive because they are already
+        // part of the device's local registry.
+        const accountClients = await store.listClients(accountId);
+        for (const client of accountClients) {
+            const ids = Array.isArray(client.deviceIds) ? client.deviceIds : [];
+            if (!ids.includes(device.id)) await store.deleteClient(client.id);
+        }
+        const accountDevices = await store.listDevices(accountId);
+        for (const other of accountDevices) {
+            if (other.id !== device.id) {
+                // An offline phone may later re-announce its still-local
+                // registry. Keeping it out of cloud participation makes the
+                // user's chosen replacement durable without remotely erasing
+                // that phone's private copy.
+                await store.setDeviceSyncEnabled(other.id, accountId, false);
+            }
+        }
+    }
+
+    await store.setDeviceSyncEnabled(device.id, accountId, true);
+    await refreshRegistryCache();
+    const current = devices.get(device.id);
+    addLog(null, 'Uygulama', device.id, 'Senkronizasyon Yönü Seçildi', 'warning',
+        strategy === 'cloud' ? 'Bulut verileri bu telefona uygulandı.' : 'Bu telefonun verileri bulut için kaynak seçildi.');
+    res.json({ status: 'ok', strategy, ...(await accountSyncSnapshot(current)) });
+});
+
+/**
  * Stores one opaque cookie package. Only the current origin/default device may
  * replace it. Other account devices continuously read the package but never
  * race to overwrite one another.
@@ -2864,7 +2951,7 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
     const iv = String((req.body && req.body.iv) || '');
     const ciphertext = String((req.body && req.body.ciphertext) || '');
     const base64 = /^[A-Za-z0-9+/]+={0,2}$/;
-    if (version !== 1 || iv.length < 16 || iv.length > 64 || !base64.test(iv)) {
+    if (![1, 2].includes(version) || iv.length < 16 || iv.length > 64 || !base64.test(iv)) {
         return res.status(400).json({ error: 'invalid_snapshot', message: 'Şifreli çerez paketinin sürümü veya IV alanı geçersiz.' });
     }
     if (ciphertext.length < 24 || ciphertext.length > 350_000 || !base64.test(ciphertext)) {

@@ -443,12 +443,20 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     ]);
     await appSignUp(first, email, password);
 
+    const localOnlySnapshot = await appApi(first, 'GET', '/api/v1/sync');
+    assert.equal(localOnlySnapshot.status, 200);
+    assert.equal(localOnlySnapshot.body.clients.length, 0,
+        'tercih yapılmadan yerel oturum bulut envanterine girdi');
+
+    const enabledDeviceSync = await appApi(first, 'POST', '/api/v1/sync/device-mode', { enabled: true });
+    assert.equal(enabledDeviceSync.status, 200, JSON.stringify(enabledDeviceSync.body));
+
     const enabledCookies = await appApi(first, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`);
     assert.equal(enabledCookies.status, 200, JSON.stringify(enabledCookies.body));
 
     const encryptedCookiePackage = Buffer.from('yalnizca-cihazda-cozulebilen-paket').toString('base64');
     const uploadedCookies = await appApi(first, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
-        version: 1,
+        version: 2,
         iv: Buffer.from('on-iki-byte-iv').toString('base64'),
         ciphertext: encryptedCookiePackage
     });
@@ -481,7 +489,7 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     assert.equal(restorable.secretHash, sha256(secret));
     assert.equal(restorable.secret, undefined, 'düz metin token senkronizasyon API’sine sızdı');
     assert.deepEqual(restorable.deviceIds, ['dev_coklu_1']);
-    assert.equal(restorable.cookieSnapshot.version, 1);
+    assert.equal(restorable.cookieSnapshot.version, 2);
     assert.equal(restorable.cookieSnapshot.ciphertext, encryptedCookiePackage);
     assert.equal(JSON.stringify(restorable).includes('yalnizca-cihazda'), false,
         'çerez paketinin düz metni senkronizasyon görünümüne sızdı');
