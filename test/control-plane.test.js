@@ -448,8 +448,20 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     assert.equal(localOnlySnapshot.body.clients.length, 0,
         'tercih yapılmadan yerel oturum bulut envanterine girdi');
 
-    const enabledDeviceSync = await appApi(first, 'POST', '/api/v1/sync/device-mode', { enabled: true });
+    const enabledDeviceSync = await appApi(first, 'POST', '/api/v1/sync/device-mode', {
+        sessionsEnabled: true,
+        cookiesEnabled: false
+    });
     assert.equal(enabledDeviceSync.status, 200, JSON.stringify(enabledDeviceSync.body));
+    assert.equal(enabledDeviceSync.body.sessionSyncEnabled, true);
+    assert.equal(enabledDeviceSync.body.cookieSyncEnabled, false,
+        'oturum eşitlemesi çerez eşitlemesini kendiliğinden açtı');
+    const enabledCookieMode = await appApi(first, 'POST', '/api/v1/sync/device-mode', {
+        sessionsEnabled: true,
+        cookiesEnabled: true
+    });
+    assert.equal(enabledCookieMode.status, 200, JSON.stringify(enabledCookieMode.body));
+    assert.equal(enabledCookieMode.body.cookieSyncEnabled, true);
 
     const enabledCookies = await appApi(first, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`);
     assert.equal(enabledCookies.status, 200, JSON.stringify(enabledCookies.body));
@@ -477,6 +489,11 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     const second = await connectDevice('dev_coklu_2', 'cihaz-sirri-coklu-iki');
     const login = await appApi(second, 'POST', '/api/v1/login', { email, password });
     assert.equal(login.status, 200, `ikinci cihaz hesaba bağlanamadı: ${JSON.stringify(login.body)}`);
+    const secondSyncChoice = await appApi(second, 'POST', '/api/v1/sync/device-mode', {
+        sessionsEnabled: true,
+        cookiesEnabled: true
+    });
+    assert.equal(secondSyncChoice.status, 200, JSON.stringify(secondSyncChoice.body));
 
     const syncBeforeRestore = await appApi(second, 'GET', '/api/v1/sync');
     assert.equal(syncBeforeRestore.status, 200);
@@ -537,6 +554,15 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     const selectedCall = await callTool(token, { deviceId: 'dev_coklu_2' });
     assert.equal(selectedCall.status, 200);
     assert.equal((await selectedCall.json()).data.deviceId, 'dev_coklu_2', 'açık cihaz seçimi uygulanmadı');
+
+    const changedDefault = await appApi(second, 'POST', '/api/v1/account/default-device', { enabled: true });
+    assert.equal(changedDefault.status, 200, JSON.stringify(changedDefault.body));
+    assert.equal(changedDefault.body.defaultDeviceId, 'dev_coklu_2');
+    assert.equal(changedDefault.body.isDefaultBrowser, true);
+    const defaultAfterChoice = await callTool(token);
+    assert.equal(defaultAfterChoice.status, 200);
+    assert.equal((await defaultAfterChoice.json()).data.deviceId, 'dev_coklu_2',
+        'cihaz kimliği olmayan istek kullanıcı seçimine gitmedi');
 
     const refused = await callTool(token, { deviceId: 'dev_hesap_disinda' });
     assert.equal(refused.status, 502);

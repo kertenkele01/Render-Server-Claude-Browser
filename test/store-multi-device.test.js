@@ -21,6 +21,11 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
         await store.upsertDevice({ id: 'dev_store_2', secretHash: 'd2', name: 'Tablet' });
         await store.setDeviceAccount('dev_store_1', account.id);
         await store.setDeviceAccount('dev_store_2', account.id);
+        await store.setAccountDefaultDevice(account.id, 'dev_store_2');
+        await store.setDeviceSyncEnabled('dev_store_2', account.id, true);
+        await store.setDeviceCookieSyncEnabledGlobal('dev_store_2', account.id, true);
+        assert.equal((await store.getAccountById(account.id)).defaultDeviceId, 'dev_store_2');
+        assert.equal((await store.getDevice('dev_store_2')).cookieSyncEnabled, true);
 
         const first = await store.upsertClient({
             id: 'cli_store_multi',
@@ -111,6 +116,7 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
         store = null;
 
         const restored = await openStore({ stateFile, databaseUrl: '' });
+        assert.equal((await restored.getAccountById(account.id)).defaultDeviceId, 'dev_store_2');
         assert.deepEqual((await restored.getClient('cli_store_multi')).deviceIds, ['dev_store_2']);
         const preservedCloudClient = await restored.getClient('cli_eski_hesap');
         assert.equal(preservedCloudClient.accountId, account.id);

@@ -1209,8 +1209,30 @@ function selectBoundDevice(record, requestedDeviceId = null) {
         return requestedDeviceId;
     }
 
-    // The phone that minted the credential remains the default route, keeping
-    // every existing one-device setup unchanged.
+    // Routing preference is account-level and deliberately separate from
+    // clients.deviceId. The latter identifies the credential/cookie origin and
+    // changing it merely to route a command would weaken ownership checks.
+    const accountDefaultDeviceId = record.accountId
+        ? accountCache.get(record.accountId)?.defaultDeviceId
+        : null;
+    if (accountDefaultDeviceId) {
+        if (!allowed.includes(accountDefaultDeviceId)) {
+            throw new Error(
+                `Varsayılan tarayıcı (${deviceChoiceLabel(accountDefaultDeviceId)}) bu AI oturumuna bağlı değil. ` +
+                'Android uygulamasında oturum senkronizasyonunu açın veya bu oturumun bulunduğu telefonu varsayılan yapın.'
+            );
+        }
+        if (!onlineBrowser(accountDefaultDeviceId)) {
+            throw new Error(
+                `Varsayılan tarayıcı (${deviceChoiceLabel(accountDefaultDeviceId)}) çevrimdışı. ` +
+                'Android uygulamasında çevrimiçi bir telefonu “Varsayılan tarayıcı” olarak seçin.'
+            );
+        }
+        return accountDefaultDeviceId;
+    }
+
+    // Accounts created before the explicit setting keep their original route
+    // until the owner chooses a default in the Android app.
     if (record.deviceId && allowed.includes(record.deviceId) && onlineBrowser(record.deviceId)) {
         return record.deviceId;
     }
@@ -1727,7 +1749,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             },
             serverInfo: {
                 name: "mcp-android-bridge",
-                version: "1.1.0",
+                version: "1.2.0",
                 description: "Android Real Browser MCP Bridge. To view full guide, parameters, and recommended agent workflows, call 'browser_get_tool_documentation'."
             }
         });
@@ -1779,7 +1801,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
                     deviceId,
                     name: device?.name || deviceId,
                     online: !!onlineBrowser(deviceId),
-                    isDefault: deviceId === auth.record.deviceId,
+                    isDefault: deviceId === (accountCache.get(auth.record.accountId)?.defaultDeviceId || auth.record.deviceId),
                     lastSeenAt: device?.lastSeenAt || null
                 };
             });
@@ -2634,6 +2656,12 @@ async function accountSnapshot(device) {
         accountId: account.id,
         deviceId: device.id,
         deviceName: device.name,
+        defaultDeviceId: account.defaultDeviceId || '',
+        isDefaultBrowser: account.defaultDeviceId === device.id,
+        sessionSyncEnabled: device.syncEnabled === true,
+        cookieSyncEnabled: device.cookieSyncEnabled === true,
+        // Backward-compatible alias for app builds before the two switches
+        // were separated.
         syncEnabled: device.syncEnabled === true,
         email: account.email,
         status: account.status,
@@ -2651,6 +2679,9 @@ async function accountSnapshot(device) {
 /** Attaches this device to an account, and its clients with it. */
 async function linkDeviceToAccount(device, account) {
     await store.setDeviceAccount(device.id, account.id);
+    if (!account.defaultDeviceId) {
+        await store.setAccountDefaultDevice(account.id, device.id);
+    }
     await refreshRegistryCache();
     addLog(null, 'Uygulama', device.id, 'Cihaz Bağlandı', 'success', 'Cihaz hesaba bağlandı.');
 }
@@ -2764,6 +2795,28 @@ app.get('/api/v1/account', async (req, res) => {
     res.json(await accountSnapshot(device));
 });
 
+/** Makes the calling phone the explicit no-deviceId route for this account. */
+app.post('/api/v1/account/default-device', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) {
+        return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    }
+    const enabled = req.body?.enabled !== false;
+    const account = await store.getAccountById(device.accountId);
+    const nextDeviceId = enabled
+        ? device.id
+        : (account?.defaultDeviceId === device.id ? null : account?.defaultDeviceId || null);
+    const changed = await store.setAccountDefaultDevice(device.accountId, nextDeviceId);
+    if (!changed) {
+        return res.status(409).json({ error: 'default_device_failed', message: 'Varsayılan tarayıcı değiştirilemedi.' });
+    }
+    await refreshRegistryCache();
+    addLog(null, 'Uygulama', device.id, 'Varsayılan Tarayıcı', 'success',
+        enabled ? 'Bu cihaz varsayılan yönlendirme hedefi yapıldı.' : 'Bu cihazın varsayılan yönlendirmesi kaldırıldı.');
+    res.json({ status: 'ok', ...(await accountSnapshot(devices.get(device.id))) });
+});
+
 /**
  * The account-owned inventory used by the Android app's device-sync screen.
  *
@@ -2773,7 +2826,8 @@ app.get('/api/v1/account', async (req, res) => {
  * and the relay still never stores or returns the plaintext secret.
  */
 async function accountSyncSnapshot(device) {
-    const [ownedDevices, ownedClients, cookieSnapshots] = await Promise.all([
+    const [account, ownedDevices, ownedClients, cookieSnapshots] = await Promise.all([
+        store.getAccountById(device.accountId),
         store.listDevices(device.accountId),
         store.listClients(device.accountId),
         store.listCookieSnapshots(device.accountId)
@@ -2790,6 +2844,7 @@ async function accountSyncSnapshot(device) {
         return ids.some((id) => syncingDeviceIds.has(id));
     });
     return {
+        defaultDeviceId: account?.defaultDeviceId || '',
         devices: ownedDevices.map((row) => ({
             deviceId: row.id,
             name: row.name || row.id,
@@ -2797,7 +2852,9 @@ async function accountSyncSnapshot(device) {
             lastSeenAt: row.lastSeenAt || 0,
             online: browsers.has(row.id),
             isCurrent: row.id === device.id,
-            syncEnabled: row.syncEnabled === true
+            isDefault: row.id === account?.defaultDeviceId,
+            syncEnabled: row.syncEnabled === true,
+            cookieSyncEnabled: row.cookieSyncEnabled === true
         })),
         clients: syncedClients.map((row) => {
             const encrypted = cookiesByClient.get(row.id);
@@ -2806,6 +2863,9 @@ async function accountSyncSnapshot(device) {
                 name: row.name || 'AI istemcisi',
                 secretHash: row.secretHash,
                 createdAt: row.createdAt || 0,
+                originDeviceId: row.deviceId,
+                // Legacy field name retained for app builds that predate the
+                // account-level routing preference.
                 defaultDeviceId: row.deviceId,
                 deviceIds: Array.isArray(row.deviceIds) ? row.deviceIds : [row.deviceId].filter(Boolean),
                 cookieSyncEnabled: !!row.cookieSyncEnabled,
@@ -2850,11 +2910,32 @@ app.post('/api/v1/sync/device-mode', async (req, res) => {
     if (!device.accountId) {
         return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
     }
-    const enabled = req.body && req.body.enabled === true;
-    await store.setDeviceSyncEnabled(device.id, device.accountId, enabled);
+    const legacyEnabled = req.body && req.body.enabled === true;
+    const sessionsEnabled = req.body && typeof req.body.sessionsEnabled === 'boolean'
+        ? req.body.sessionsEnabled
+        : legacyEnabled;
+    const cookiesEnabled = sessionsEnabled && (req.body && typeof req.body.cookiesEnabled === 'boolean'
+        ? req.body.cookiesEnabled
+        : legacyEnabled);
+    await store.setDeviceSyncEnabled(device.id, device.accountId, sessionsEnabled);
+    await store.setDeviceCookieSyncEnabledGlobal(device.id, device.accountId, cookiesEnabled);
+    if (!cookiesEnabled) {
+        const accountClients = await store.listClients(device.accountId);
+        for (const client of accountClients) {
+            if (boundDeviceIds(client).includes(device.id)) {
+                await store.setDeviceCookieSyncEnabled(client.id, device.id, device.accountId, false);
+            }
+        }
+    }
     await refreshRegistryCache();
     const current = devices.get(device.id);
-    res.json({ status: 'ok', syncEnabled: enabled, ...(await accountSyncSnapshot(current)) });
+    res.json({
+        status: 'ok',
+        syncEnabled: sessionsEnabled,
+        sessionSyncEnabled: sessionsEnabled,
+        cookieSyncEnabled: cookiesEnabled,
+        ...(await accountSyncSnapshot(current))
+    });
 });
 
 /**
@@ -2915,7 +2996,7 @@ app.post('/api/v1/sync/resolve', async (req, res) => {
 });
 
 /**
- * Stores one opaque cookie package. Only the current origin/default device may
+ * Stores one opaque cookie package. Only the current cookie-origin device may
  * replace it. Other account devices continuously read the package but never
  * race to overwrite one another.
  */
@@ -2926,6 +3007,12 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
         return res.status(403).json({
             error: 'not_linked',
             message: 'Çerez eşitlemek için önce hesabınıza giriş yapın.'
+        });
+    }
+    if (!device.syncEnabled || !device.cookieSyncEnabled) {
+        return res.status(409).json({
+            error: 'device_cookie_sync_disabled',
+            message: 'Bu telefonda çerez senkronizasyonu kapalı. Önce Hesabınız bölümünden açın.'
         });
     }
 
@@ -2991,6 +3078,12 @@ app.post('/api/v1/sync/clients/:clientId/cookies/enable', async (req, res) => {
     if (!device) return;
     if (!device.accountId) {
         return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    }
+    if (!device.syncEnabled || !device.cookieSyncEnabled) {
+        return res.status(409).json({
+            error: 'device_cookie_sync_disabled',
+            message: 'Bu telefonda çerez senkronizasyonu kapalı. Önce Hesabınız bölümünden açın.'
+        });
     }
     const clientId = String(req.params.clientId || '');
     const client = await store.getClient(clientId);
