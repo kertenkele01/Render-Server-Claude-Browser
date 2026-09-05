@@ -57,8 +57,8 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
         await store.setDeviceCookieSyncEnabled('cli_store_multi', 'dev_store_1', account.id, false);
         assert.equal(
             (await store.getClient('cli_store_multi')).deviceId,
-            'dev_store_2',
-            'çerez eşitlemesi kapanan yazıcıdan diğer etkin cihaza devredilmedi'
+            'dev_store_1',
+            'çerez ayarı credential sahibini değiştirdi'
         );
 
         await store.replaceDeviceClients('dev_store_2', []);
@@ -73,8 +73,8 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
         await store.replaceDeviceClients('dev_store_1', []);
         assert.equal(
             (await store.getClient('cli_store_multi')).deviceId,
-            'dev_store_2',
-            'kaydı bırakan kaynak cihaz varsayılan hedef olarak kaldı'
+            'dev_store_1',
+            'bağlantı kaldırma credential sahibini değiştirdi'
         );
         await store.upsertClient({
             id: 'cli_store_multi',
@@ -84,7 +84,7 @@ test('dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmas�
         });
         await store.setDeviceAccount('dev_store_1', null);
         const handedOff = await store.getClient('cli_store_multi');
-        assert.equal(handedOff.deviceId, 'dev_store_2', 'çıkan kaynak cihaz varsayılan kalmaya devam etti');
+        assert.equal(handedOff.deviceId, 'dev_store_1', 'hesaptan ayrılmak credential sahibini değiştirdi');
         assert.equal(handedOff.accountId, account.id, 'kalan cihazın hesap bağı kayboldu');
         assert.deepEqual(handedOff.deviceIds, ['dev_store_2']);
 

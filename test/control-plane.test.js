@@ -418,6 +418,10 @@ test('istemci anahtarı çalışır, telefondan iptal edilince durur', async () 
         { clientId: 'cli_mcp_1', secret, name: 'Test istemcisi' }
     ]);
     await appSignUp(device, 'mcp@test.com', 'cok-guclu-parola-9');
+    await appApi(device, 'POST', '/api/v1/account/main-device', { deviceId: device.deviceId });
+    await appApi(device, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: true, cookiesEnabled: false });
+    const setup = await appApi(device, 'GET', '/api/v1/account');
+    await appApi(device, 'POST', '/api/v1/account/main-device/ready', { generation: setup.body.mainGeneration });
 
     const before = await callTool(`cli_mcp_1.${secret}`);
     assert.equal(before.status, 200, 'geçerli anahtar reddedildi');
@@ -442,6 +446,7 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
         { clientId, secret, name: 'Ortak ChatGPT' }
     ]);
     await appSignUp(first, email, password);
+    await appApi(first, 'POST', '/api/v1/account/main-device', { deviceId: 'dev_coklu_1' });
 
     const localOnlySnapshot = await appApi(first, 'GET', '/api/v1/sync');
     assert.equal(localOnlySnapshot.status, 200);
@@ -466,9 +471,12 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     const enabledCookies = await appApi(first, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`);
     assert.equal(enabledCookies.status, 200, JSON.stringify(enabledCookies.body));
 
+    const preparedMain = await appApi(first, 'POST', '/api/v1/account/main-device/ready', { generation: enabledCookieMode.body.mainGeneration });
+    assert.equal(preparedMain.status, 200);
+    const firstGeneration = preparedMain.body.mainGeneration;
     const encryptedCookiePackage = Buffer.from('yalnizca-cihazda-cozulebilen-paket').toString('base64');
     const uploadedCookies = await appApi(first, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
-        version: 2,
+        version: 2, generation: firstGeneration,
         iv: Buffer.from('on-iki-byte-iv').toString('base64'),
         ciphertext: encryptedCookiePackage
     });
@@ -555,10 +563,10 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     assert.equal(selectedCall.status, 200);
     assert.equal((await selectedCall.json()).data.deviceId, 'dev_coklu_2', 'açık cihaz seçimi uygulanmadı');
 
-    const changedDefault = await appApi(second, 'POST', '/api/v1/account/default-device', { enabled: true });
+    const changedDefault = await appApi(first, 'POST', '/api/v1/account/main-device', { deviceId: 'dev_coklu_2' });
     assert.equal(changedDefault.status, 200, JSON.stringify(changedDefault.body));
     assert.equal(changedDefault.body.defaultDeviceId, 'dev_coklu_2');
-    assert.equal(changedDefault.body.isDefaultBrowser, true);
+    assert.equal(changedDefault.body.isDefaultBrowser, false);
     const defaultAfterChoice = await callTool(token);
     assert.equal(defaultAfterChoice.status, 200);
     assert.equal((await defaultAfterChoice.json()).data.deviceId, 'dev_coklu_2',
@@ -568,15 +576,25 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     assert.equal(refused.status, 502);
     assert.match((await refused.json()).error, /yetkili değil/i);
 
-    const deletedCloudCookies = await appApi(second, 'DELETE', `/api/v1/sync/clients/${clientId}/cookies`);
+    const secondGeneration = changedDefault.body.mainGeneration;
+    assert.equal(changedDefault.body.mainReady, false, 'yeni ana cihaz hazırlanmadan yazabilir');
+    const packageBody = { version: 2, generation: secondGeneration, iv: Buffer.from('on-iki-byte-iv').toString('base64'), ciphertext: encryptedCookiePackage };
+    assert.equal((await appApi(second, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, packageBody)).status, 409);
+    assert.equal((await appApi(first, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, { ...packageBody, generation: firstGeneration })).status, 403);
+    assert.equal((await appApi(first, 'DELETE', `/api/v1/sync/clients/${clientId}/cookies`)).status, 403, 'yedek bulut kopyasını sildi');
+    assert.equal((await appApi(first, 'POST', '/api/v1/account/main-device/ready', { generation: firstGeneration })).status, 409);
+    await appApi(second, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`);
+    assert.equal((await appApi(second, 'POST', '/api/v1/account/main-device/ready', { generation: secondGeneration })).status, 200);
+    assert.equal((await appApi(second, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, packageBody)).status, 200, 'yeni ana cihaz yazamadı');
+    first.send({ type: 'revoke_client', clientId });
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal((await callTool(token)).status, 200, 'yedekten silmek ana bağlantıyı iptal etti');
+    assert.equal((await appApi(second, 'GET', '/api/v1/sync')).body.clients.find(c => c.clientId === clientId).cookieSnapshot.ciphertext, encryptedCookiePackage);
+    first.send({ type: 'client_added', clientId, secretHash: sha256(secret), name: 'Ortak ChatGPT' });
+    await new Promise(r => setTimeout(r, 100));
+    const deletedCloudCookies = await appApi(second, 'DELETE', `/api/v1/sync/clients/${clientId}/cookies`, { generation: secondGeneration });
     assert.equal(deletedCloudCookies.status, 200);
-    const uploadWhileDisabled = await appApi(first, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
-        version: 1,
-        iv: Buffer.from('on-iki-byte-iv').toString('base64'),
-        ciphertext: encryptedCookiePackage
-    });
-    assert.equal(uploadWhileDisabled.status, 409, 'silinen bulut kopyası kaynak telefon tarafından kendiliğinden geri oluşturuldu');
-    assert.equal((await appApi(first, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`)).status, 200);
+    assert.equal((await appApi(second, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, packageBody)).status, 409);
 
     const removedSecondary = await appApi(first, 'DELETE', '/api/v1/devices/dev_coklu_2');
     assert.equal(removedSecondary.status, 200, JSON.stringify(removedSecondary.body));
@@ -589,6 +607,8 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     assert.equal((await callTool(token, { deviceId: 'dev_coklu_2' })).status, 502,
         'hesaptan çıkarılan telefon yeniden bağlanabildi');
 
+    const selectFirst = await appApi(first, 'POST', '/api/v1/account/main-device', { deviceId: 'dev_coklu_1' });
+    await appApi(first, 'POST', '/api/v1/account/main-device/ready', { generation: selectFirst.body.mainGeneration });
     first.send({ type: 'revoke_client', clientId });
     await new Promise((r) => setTimeout(r, 100));
     assert.equal((await callTool(token)).status, 401, 'çoklu cihaz anahtarı iptalden sonra çalışıyor');

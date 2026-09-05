@@ -1210,7 +1210,7 @@ function selectBoundDevice(record, requestedDeviceId = null) {
     }
 
     // Routing preference is account-level and deliberately separate from
-    // clients.deviceId. The latter identifies the credential/cookie origin and
+    // clients.deviceId. The latter identifies the credential origin and
     // changing it merely to route a command would weaken ownership checks.
     const accountDefaultDeviceId = record.accountId
         ? accountCache.get(record.accountId)?.defaultDeviceId
@@ -1218,14 +1218,14 @@ function selectBoundDevice(record, requestedDeviceId = null) {
     if (accountDefaultDeviceId) {
         if (!allowed.includes(accountDefaultDeviceId)) {
             throw new Error(
-                `Varsayılan tarayıcı (${deviceChoiceLabel(accountDefaultDeviceId)}) bu AI oturumuna bağlı değil. ` +
-                'Android uygulamasında oturum senkronizasyonunu açın veya bu oturumun bulunduğu telefonu varsayılan yapın.'
+                `Ana cihaz (${deviceChoiceLabel(accountDefaultDeviceId)}) bu AI oturumuna bağlı değil. ` +
+                'Android uygulamasında oturum senkronizasyonunu açın veya bu oturumun bulunduğu telefonu ana cihaz yapın.'
             );
         }
         if (!onlineBrowser(accountDefaultDeviceId)) {
             throw new Error(
-                `Varsayılan tarayıcı (${deviceChoiceLabel(accountDefaultDeviceId)}) çevrimdışı. ` +
-                'Android uygulamasında çevrimiçi bir telefonu “Varsayılan tarayıcı” olarak seçin.'
+                `Ana cihaz (${deviceChoiceLabel(accountDefaultDeviceId)}) çevrimdışı. ` +
+                'Android uygulamasında çevrimiçi bir telefonu “Ana cihaz” olarak seçin.'
             );
         }
         return accountDefaultDeviceId;
@@ -1398,6 +1398,7 @@ wss.on('connection', (ws) => {
                     }
                 });
                 const reconciliation = await store.replaceDeviceClients(id, list);
+                await store.publishDeviceClients((await store.getDevice(id))?.accountId, id);
                 if (reconciliation && reconciliation.conflicts && reconciliation.conflicts.length > 0) {
                     console.warn(`[WS] Device '${id}' could not bind conflicting clients: ${reconciliation.conflicts.join(', ')}`);
                 }
@@ -1456,6 +1457,7 @@ wss.on('connection', (ws) => {
                 return;
             }
             await refreshRegistryCache();
+            await store.publishDeviceClients(stored.accountId, deviceId);
             addLog(cid, payload.name, deviceId, 'İstemci Eklendi', 'success', 'Cihaz yeni bir erişim anahtarı üretti.');
             return;
         }
@@ -1464,6 +1466,13 @@ wss.on('connection', (ws) => {
             const cid = String(payload.clientId || '').trim();
             const rec = clients.get(cid);
             if (rec && boundDeviceIds(rec).includes(deviceId)) {
+                const owner = rec.accountId && await store.getAccountById(rec.accountId);
+                const source = await store.getDevice(deviceId);
+                if (owner && (owner.defaultDeviceId !== deviceId || !source?.syncEnabled || !owner.mainReady)) {
+                    await store.unbindClient(cid, deviceId);
+                    await refreshRegistryCache();
+                    return;
+                }
                 await store.deleteClient(cid);
                 await refreshRegistryCache();
                 boundDeviceIds(rec).forEach((id) => {
@@ -2656,6 +2665,8 @@ async function accountSnapshot(device) {
         accountId: account.id,
         deviceId: device.id,
         deviceName: device.name,
+        mainGeneration: account.mainGeneration || 0,
+        mainReady: account.mainReady === true,
         defaultDeviceId: account.defaultDeviceId || '',
         isDefaultBrowser: account.defaultDeviceId === device.id,
         sessionSyncEnabled: device.syncEnabled === true,
@@ -2679,9 +2690,7 @@ async function accountSnapshot(device) {
 /** Attaches this device to an account, and its clients with it. */
 async function linkDeviceToAccount(device, account) {
     await store.setDeviceAccount(device.id, account.id);
-    if (!account.defaultDeviceId) {
-        await store.setAccountDefaultDevice(account.id, device.id);
-    }
+    // Signing in must never silently promote a backup into the cloud writer.
     await refreshRegistryCache();
     addLog(null, 'Uygulama', device.id, 'Cihaz Bağlandı', 'success', 'Cihaz hesaba bağlandı.');
 }
@@ -2796,24 +2805,33 @@ app.get('/api/v1/account', async (req, res) => {
 });
 
 /** Makes the calling phone the explicit no-deviceId route for this account. */
-app.post('/api/v1/account/default-device', async (req, res) => {
+// Selection changes routing and the sole cloud writer together. The target phone
+// prepares the cloud baseline before acknowledging readiness; selection never enables sync.
+app.post(['/api/v1/account/main-device', '/api/v1/account/default-device'], async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;
-    if (!device.accountId) {
-        return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
-    }
-    const enabled = req.body?.enabled !== false;
-    const account = await store.getAccountById(device.accountId);
-    const nextDeviceId = enabled
-        ? device.id
-        : (account?.defaultDeviceId === device.id ? null : account?.defaultDeviceId || null);
-    const changed = await store.setAccountDefaultDevice(device.accountId, nextDeviceId);
-    if (!changed) {
-        return res.status(409).json({ error: 'default_device_failed', message: 'Varsayılan tarayıcı değiştirilemedi.' });
-    }
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
+    const targetId = req.body?.enabled === false ? null : String(req.body?.deviceId || device.id);
+    const changed = await store.setAccountDefaultDevice(device.accountId, targetId);
+    if (!changed) return res.status(409).json({ error: 'main_device_failed', message: 'Ana cihaz bu hesaba ait olmalı.' });
     await refreshRegistryCache();
-    addLog(null, 'Uygulama', device.id, 'Varsayılan Tarayıcı', 'success',
-        enabled ? 'Bu cihaz varsayılan yönlendirme hedefi yapıldı.' : 'Bu cihazın varsayılan yönlendirmesi kaldırıldı.');
+    addLog(null, 'Uygulama', device.id, 'Ana Cihaz Seçildi', 'success',
+        targetId ? 'Kullanıcı ana cihazı seçti; bulut hazırlığı bekleniyor.' : 'Ana cihaz seçimi kaldırıldı.');
+    for (const owned of await store.listDevices(device.accountId)) {
+        const socket = browsers.get(owned.id);
+        if (socket?.readyState === 1) socket.send(JSON.stringify({ type: 'main_device_changed' }));
+    }
+    res.json({ status: 'ok', ...(await accountSnapshot(devices.get(device.id))) });
+});
+
+app.post('/api/v1/account/main-device/ready', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId || !device.syncEnabled) return res.status(403).json({ error: 'sync_disabled' });
+    const ready = await store.markMainReady(device.accountId, device.id, Number(req.body?.generation));
+    if (!ready) return res.status(409).json({ error: 'main_device_changed', message: 'Ana cihaz değişti; eşitlemeyi yenileyin.' });
+    await store.publishDeviceClients(device.accountId, device.id);
+    await refreshRegistryCache();
     res.json({ status: 'ok', ...(await accountSnapshot(devices.get(device.id))) });
 });
 
@@ -2833,17 +2851,12 @@ async function accountSyncSnapshot(device) {
         store.listCookieSnapshots(device.accountId)
     ]);
     const cookiesByClient = new Map(cookieSnapshots.map((row) => [row.clientId, row]));
-    const syncingDeviceIds = new Set(
-        ownedDevices.filter((row) => row.syncEnabled === true).map((row) => row.id)
-    );
-    // A device may belong to the account while remaining local-only. Its
-    // sessions must still route through the relay, but they are not offered to
-    // the account's other phones until the owner opts in.
-    const syncedClients = ownedClients.filter((row) => {
-        const ids = Array.isArray(row.deviceIds) ? row.deviceIds : [row.deviceId].filter(Boolean);
-        return ids.some((id) => syncingDeviceIds.has(id));
-    });
+    // The routing registry exists even for local-only devices. Only the main
+    // phone explicitly publishes connections into the cloud restore inventory.
+    const syncedClients = ownedClients.filter((row) => row.cloudPublished === true);
     return {
+        mainGeneration: account?.mainGeneration || 0,
+        mainReady: account?.mainReady === true,
         defaultDeviceId: account?.defaultDeviceId || '',
         devices: ownedDevices.map((row) => ({
             deviceId: row.id,
@@ -2918,6 +2931,7 @@ app.post('/api/v1/sync/device-mode', async (req, res) => {
         ? req.body.cookiesEnabled
         : legacyEnabled);
     await store.setDeviceSyncEnabled(device.id, device.accountId, sessionsEnabled);
+    if (sessionsEnabled) await store.publishDeviceClients(device.accountId, device.id);
     await store.setDeviceCookieSyncEnabledGlobal(device.id, device.accountId, cookiesEnabled);
     if (!cookiesEnabled) {
         const accountClients = await store.listClients(device.accountId);
@@ -2955,37 +2969,11 @@ app.post('/api/v1/sync/resolve', async (req, res) => {
     }
 
     const accountId = device.accountId;
-    if (strategy === 'cloud') {
-        // Removing the device binding first promotes an existing account phone
-        // to writer. Connections that existed only on this phone are then true
-        // orphans and are discarded before the cloud snapshot is returned.
-        await store.setDeviceAccount(device.id, null);
-        await store.setDeviceAccount(device.id, accountId);
-        const afterDetach = await store.listClients(accountId);
-        for (const client of afterDetach) {
-            const ids = Array.isArray(client.deviceIds) ? client.deviceIds : [];
-            if (ids.length === 0) await store.deleteClient(client.id);
-        }
-    } else {
-        // The phone is authoritative: remove every account connection that is
-        // not present on it. Shared identities survive because they are already
-        // part of the device's local registry.
-        const accountClients = await store.listClients(accountId);
-        for (const client of accountClients) {
-            const ids = Array.isArray(client.deviceIds) ? client.deviceIds : [];
-            if (!ids.includes(device.id)) await store.deleteClient(client.id);
-        }
-        const accountDevices = await store.listDevices(accountId);
-        for (const other of accountDevices) {
-            if (other.id !== device.id) {
-                // An offline phone may later re-announce its still-local
-                // registry. Keeping it out of cloud participation makes the
-                // user's chosen replacement durable without remotely erasing
-                // that phone's private copy.
-                await store.setDeviceSyncEnabled(other.id, accountId, false);
-            }
-        }
+    const account = await store.getAccountById(accountId);
+    if (strategy === 'device' && account?.defaultDeviceId !== device.id) {
+        return res.status(403).json({ error: 'not_main_device', message: 'Yedek cihaz bulut kaydını değiştiremez. Önce bu telefonu ana cihaz seçin.' });
     }
+    // Enabling sync never deletes another phone's connections or local profiles.
 
     await store.setDeviceSyncEnabled(device.id, accountId, true);
     await refreshRegistryCache();
@@ -3021,10 +3009,11 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
     if (!client || client.accountId !== device.accountId) {
         return res.status(404).json({ error: 'not_found', message: 'Bu AI oturumu hesabınızda bulunamadı.' });
     }
-    if (client.deviceId !== device.id) {
+    const main = await store.getAccountById(device.accountId);
+    if (main?.defaultDeviceId !== device.id || !boundDeviceIds(client).includes(device.id)) {
         return res.status(403).json({
             error: 'not_origin_device',
-            message: 'Çerez paketini yalnızca hesabın bu bağlantı için seçtiği kaynak cihaz güncelleyebilir.'
+            message: 'Çerez paketini yalnızca seçili ana cihaz güncelleyebilir.'
         });
     }
     if (!client.cookieSyncEnabled) {
@@ -3045,7 +3034,7 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
         return res.status(413).json({ error: 'invalid_snapshot', message: 'Şifreli çerez paketi geçersiz veya çok büyük.' });
     }
 
-    const stored = await store.upsertCookieSnapshot({
+    const stored = await store.writeMainCookieSnapshot({
         clientId,
         accountId: device.accountId,
         sourceDeviceId: device.id,
@@ -3053,7 +3042,8 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
         iv,
         ciphertext,
         updatedAt: Date.now()
-    });
+    }, Number(req.body?.generation));
+    if (!stored) return res.status(409).json({ error: 'main_not_ready', message: 'Ana cihaz veya eşitleme ayarı değişti. Uygulamada eşitlemeyi yenileyin.' });
     res.json({ status: 'ok', clientId, version: stored.version, updatedAt: stored.updatedAt });
 });
 
@@ -3068,7 +3058,13 @@ app.delete('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
     if (!client || client.accountId !== device.accountId) {
         return res.status(404).json({ error: 'not_found', message: 'Bu AI oturumu hesabınızda bulunamadı.' });
     }
-    await store.setClientCookieSyncEnabled(clientId, device.accountId, false);
+    const account = await store.getAccountById(device.accountId);
+    if (account?.defaultDeviceId !== device.id || !account.mainReady || !device.syncEnabled) {
+        return res.status(403).json({ error: 'not_main_device', message: 'Bulut kopyasını yalnızca eşitlemesi açık ana cihaz silebilir.' });
+    }
+    if (!await store.deleteMainCookieSnapshot(device.accountId, device.id, clientId, Number(req.body?.generation))) {
+        return res.status(409).json({ error: 'main_device_changed', message: 'Ana cihaz veya eşitleme ayarı değişti; uygulamadan tekrar deneyin.' });
+    }
     await refreshRegistryCache();
     res.json({ status: 'ok', clientId });
 });
@@ -3090,7 +3086,10 @@ app.post('/api/v1/sync/clients/:clientId/cookies/enable', async (req, res) => {
     if (!client || client.accountId !== device.accountId || !boundDeviceIds(client).includes(device.id)) {
         return res.status(404).json({ error: 'not_found', message: 'Bu AI oturumu bu telefona bağlı değil.' });
     }
-    await store.setClientCookieSyncEnabled(clientId, device.accountId, true);
+    const account = await store.getAccountById(device.accountId);
+    if (account?.defaultDeviceId === device.id) {
+        await store.setClientCookieSyncEnabled(clientId, device.accountId, true);
+    }
     await store.setDeviceCookieSyncEnabled(clientId, device.id, device.accountId, true);
     await refreshRegistryCache();
     res.json({ status: 'ok', clientId });
