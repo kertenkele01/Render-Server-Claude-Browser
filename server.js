@@ -2666,6 +2666,7 @@ async function accountSnapshot(device) {
         deviceId: device.id,
         deviceName: device.name,
         mainGeneration: account.mainGeneration || 0,
+        cookieKeyRevision: account.cookieKeyRevision || 0,
         mainReady: account.mainReady === true,
         defaultDeviceId: account.defaultDeviceId || '',
         isDefaultBrowser: account.defaultDeviceId === device.id,
@@ -2856,6 +2857,7 @@ async function accountSyncSnapshot(device) {
     const syncedClients = ownedClients.filter((row) => row.cloudPublished === true);
     return {
         mainGeneration: account?.mainGeneration || 0,
+        cookieKeyRevision: account?.cookieKeyRevision || 0,
         mainReady: account?.mainReady === true,
         defaultDeviceId: account?.defaultDeviceId || '',
         devices: ownedDevices.map((row) => ({
@@ -2910,6 +2912,51 @@ async function requireAccountSync(req, res) {
 app.get('/api/v1/sync', async (req, res) => {
     const snapshot = await requireAccountSync(req, res);
     if (snapshot) res.json(snapshot);
+});
+
+// The envelope is encrypted on the phone with the password-derived key. Keeping
+// the data key stable across password changes preserves existing cookie packages.
+app.get('/api/v1/sync/key-envelope', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
+    const account = await store.getAccountById(device.accountId);
+    res.json({ envelope: account.cookieKeyEnvelope || null, revision: account.cookieKeyRevision || 0 });
+});
+
+app.get('/api/v1/sync/cookie-backups', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
+    const [snapshots, connections] = await Promise.all([
+        store.listCookieSnapshots(device.accountId), store.listClients(device.accountId)
+    ]);
+    const names = new Map(connections.map(c => [c.id, c.name]));
+    res.json({ backups: snapshots.map(s => ({ clientId: s.clientId, name: names.get(s.clientId) || 'AI oturumu',
+        updatedAt: s.updatedAt, bytes: Buffer.byteLength(s.ciphertext, 'base64') })) });
+});
+
+// Explicit account-owner deletion is available even when all sync is off. It
+// never clears local profiles or routing bindings, and invalidates in-flight uploads.
+app.delete('/api/v1/sync/cookie-backups', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
+    const selected = req.body?.backups;
+    if (!Array.isArray(selected) || selected.length < 1 || selected.length > 500 ||
+        selected.some(s => !s || typeof s.clientId !== 'string' || !Number.isSafeInteger(s.updatedAt) || s.updatedAt < 1) ||
+        new Set(selected.map(s => s.clientId)).size !== selected.length) {
+        return res.status(400).json({ error: 'invalid_selection', message: 'Silinecek yedekleri listeden seçin.' });
+    }
+    if (!await store.deleteCookieBackups(device.accountId, selected)) {
+        return res.status(409).json({ error: 'backups_changed', message: 'Yedek listesi değişti. Listeyi yenileyip tekrar seçin.' });
+    }
+    await refreshRegistryCache();
+    for (const d of await store.listDevices(device.accountId)) {
+        const ws = browsers.get(d.id);
+        if (ws) try { ws.send(JSON.stringify({ type: 'main_device_changed' })); } catch (_) { /* Reconnect refreshes metadata. */ }
+    }
+    res.json({ status: 'ok', deleted: selected.length });
 });
 
 /**
@@ -3010,6 +3057,9 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
         return res.status(404).json({ error: 'not_found', message: 'Bu AI oturumu hesabınızda bulunamadı.' });
     }
     const main = await store.getAccountById(device.accountId);
+    if (main?.cookieKeyEnvelope && (Number(req.body?.cookieKeyRevision) !== main.cookieKeyRevision || req.body?.version !== 2)) {
+        return res.status(409).json({ error: 'cookie_key_changed', message: 'Yedek anahtarı değişti. Güncel uygulamada hesap bilgilerini yenileyin; gerekirse tekrar giriş yapın.' });
+    }
     if (main?.defaultDeviceId !== device.id || !boundDeviceIds(client).includes(device.id)) {
         return res.status(403).json({
             error: 'not_origin_device',
@@ -3041,6 +3091,7 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
         version,
         iv,
         ciphertext,
+        cookieKeyRevision: Number(req.body?.cookieKeyRevision),
         updatedAt: Date.now()
     }, Number(req.body?.generation));
     if (!stored) return res.status(409).json({ error: 'main_not_ready', message: 'Ana cihaz veya eşitleme ayarı değişti. Uygulamada eşitlemeyi yenileyin.' });
@@ -3176,7 +3227,18 @@ app.post('/api/v1/account/password', async (req, res) => {
     if (issue) return res.status(400).json({ error: 'weak_password', message: issue });
 
     const { passwordHash, passwordSalt } = await accounts.hashPassword(next);
-    await store.setAccountPassword(account.id, passwordHash, passwordSalt);
+    const suppliedEnvelope = req.body?.cookieKeyEnvelope || null;
+    if (suppliedEnvelope && (suppliedEnvelope.version !== 1 || !/^[A-Za-z0-9+/]{16}$/.test(suppliedEnvelope.iv || '') ||
+        !/^[A-Za-z0-9+/]{64}$/.test(suppliedEnvelope.ciphertext || ''))) {
+        return res.status(400).json({ error: 'invalid_key_envelope', message: 'Şifreli anahtar paketi geçersiz.' });
+    }
+    const envelope = suppliedEnvelope ? { version: 1, iv: suppliedEnvelope.iv, ciphertext: suppliedEnvelope.ciphertext } : null;
+    const revision = req.body?.cookieKeyRevision ?? 0;
+    if (!Number.isSafeInteger(revision) || !await store.changePasswordWithCookieKey(account.id,
+        account.passwordHash, passwordHash, passwordSalt, envelope, revision)) {
+        return res.status(409).json({ error: 'cookie_key_migration_required',
+            message: 'Parola veya yedek anahtarı değişti. Güncel uygulamada işlemi yeniden başlatın; yedekler korunmuştur.' });
+    }
     await store.revokeAccountSessions(account.id);
     if (req.body && req.body.logoutOtherDevices === true) {
         const accountDevices = await store.listDevices(account.id);
@@ -3685,7 +3747,10 @@ app.post('/account/password', async (req, res) => {
     if (issue) return res.redirect(303, '/account?err=' + encodeURIComponent(issue));
 
     const { passwordHash, passwordSalt } = await accounts.hashPassword(next);
-    await store.setAccountPassword(ctx.account.id, passwordHash, passwordSalt);
+    if (!await store.changePasswordWithCookieKey(ctx.account.id, ctx.account.passwordHash,
+        passwordHash, passwordSalt, null, ctx.account.cookieKeyRevision || 0)) {
+        return res.redirect(303, '/account?err=' + encodeURIComponent('Şifreli yedekleri korumak için parolayı Android uygulamasından değiştirin.'));
+    }
     // A password change is also how someone reacts to a stolen laptop, so it
     // has to end every other session, not just change the secret.
     await store.revokeAccountSessions(ctx.account.id, ctx.session.idHash);

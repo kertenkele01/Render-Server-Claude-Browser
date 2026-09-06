@@ -206,6 +206,7 @@ test.before(async () => {
             DATABASE_URL: '',
             BRIDGE_STATE_FILE: stateFile,
             ALLOW_REGISTRATION: 'true',
+            LIMIT_REGISTER_MAX: '100', // The suite intentionally creates isolated accounts.
             ADMIN_EMAILS: OPERATOR_EMAIL
         },
         stdio: ['ignore', 'pipe', 'pipe']
@@ -753,4 +754,41 @@ test('CSRF alanı olmadan panel girişi kabul edilmez', async () => {
     });
     assert.equal(res.status, 401);
     assert.match(await res.text(), /Form doğrulaması/);
+});
+
+
+test('şifreli anahtar geçişi ve kapalı eşitlemede bulut yedeği yönetimi hesaba özeldir', async () => {
+    const device = await connectDevice('dev_safety', 'device-safety-secret', [
+        { clientId: 'cli_safety', secret: 'client-safety-secret', name: 'Safety' }
+    ]);
+    await appSignUp(device, 'safety@test.com', 'safety-password-old');
+    await appApi(device, 'POST', '/api/v1/account/main-device', { deviceId: device.deviceId });
+    await appApi(device, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: true, cookiesEnabled: true });
+    const account = await appApi(device, 'GET', '/api/v1/account');
+    await appApi(device, 'POST', '/api/v1/account/main-device/ready', { generation: account.body.mainGeneration });
+    await appApi(device, 'POST', '/api/v1/sync/clients/cli_safety/cookies/enable');
+    const packageBody = { generation: account.body.mainGeneration, version: 2,
+        iv: Buffer.alloc(12, 1).toString('base64'), ciphertext: Buffer.alloc(48, 2).toString('base64') };
+    assert.equal((await appApi(device, 'PUT', '/api/v1/sync/clients/cli_safety/cookies', packageBody)).status, 200);
+    const change = { current: 'safety-password-old', next: 'safety-password-new' };
+    assert.equal((await appApi(device, 'POST', '/api/v1/account/password', change)).status, 409);
+    const envelope = { version: 1, iv: packageBody.iv, ciphertext: packageBody.ciphertext };
+    assert.equal((await appApi(device, 'POST', '/api/v1/account/password',
+        { ...change, cookieKeyEnvelope: { ...envelope, discarded: 'never-store-extra-fields' }, cookieKeyRevision: 0 })).status, 200);
+    assert.deepEqual((await appApi(device, 'GET', '/api/v1/sync/key-envelope')).body, { envelope, revision: 1 });
+    assert.equal((await appApi(device, 'PUT', '/api/v1/sync/clients/cli_safety/cookies', packageBody)).status, 409);
+    assert.equal((await appApi(device, 'PUT', '/api/v1/sync/clients/cli_safety/cookies', { ...packageBody, cookieKeyRevision: 1 })).status, 200);
+    await appApi(device, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: false, cookiesEnabled: false });
+    const list = await appApi(device, 'GET', '/api/v1/sync/cookie-backups');
+    assert.equal(list.status, 200);
+    assert.equal(list.body.backups.length, 1);
+    assert.equal(list.body.backups[0].ciphertext, undefined);
+    const foreign = await connectDevice('dev_safety_other', 'device-safety-secret-other');
+    await appSignUp(foreign, 'safety-other@test.com', 'safety-other-password');
+    assert.deepEqual((await appApi(foreign, 'GET', '/api/v1/sync/cookie-backups')).body.backups, []);
+    assert.equal((await appApi(foreign, 'DELETE', '/api/v1/sync/cookie-backups', { backups: list.body.backups })).status, 409);
+    assert.equal((await appApi(device, 'DELETE', '/api/v1/sync/cookie-backups', { backups: list.body.backups })).status, 200);
+    assert.deepEqual((await appApi(device, 'GET', '/api/v1/sync/cookie-backups')).body.backups, []);
+    assert.equal((await appApi(device, 'GET', '/api/v1/account')).body.sessionSyncEnabled, false);
+    device.close(); foreign.close();
 });

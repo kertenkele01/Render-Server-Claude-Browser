@@ -6,9 +6,10 @@ const os = require('node:os');
 const path = require('node:path');
 const { openStore } = require('../lib/store');
 
-test('only the explicitly selected prepared main device publishes; opt-outs and generations survive restart', async () => {
+for (const databaseUrl of ['', ...(process.env.TEST_DATABASE_URL ? [process.env.TEST_DATABASE_URL] : [])]) {
+test(`${databaseUrl ? 'PostgreSQL' : 'file'}: only the explicitly selected prepared main device publishes; opt-outs and generations survive restart`, async () => {
     const stateFile = path.join(os.tmpdir(), `bridge-main-${process.pid}-${Date.now()}.json`);
-    let store = await openStore({ stateFile, databaseUrl: '' });
+    let store = await openStore({ stateFile, databaseUrl });
     try {
         const account = await store.createAccount({ email: 'main@test.com', passwordHash: 'hash', passwordSalt: 'salt' });
         for (const id of ['main', 'backup']) {
@@ -44,7 +45,7 @@ test('only the explicitly selected prepared main device publishes; opt-outs and 
         assert.equal((await store.getClient('private-main')).cloudPublished, false);
 
         await store.close();
-        store = await openStore({ stateFile, databaseUrl: '' });
+        store = await openStore({ stateFile, databaseUrl });
         assert.equal((await store.getClient('local')).cloudPublished, false, 'restart published a backup session');
         assert.equal((await store.getClient('private-main')).cloudPublished, false);
         const newMain = await store.setAccountDefaultDevice(account.id, 'backup');
@@ -68,3 +69,5 @@ test('only the explicitly selected prepared main device publishes; opt-outs and 
         fs.rmSync(stateFile, { force: true });
     }
 });
+
+}
