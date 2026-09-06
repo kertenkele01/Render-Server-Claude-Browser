@@ -619,6 +619,101 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     reconnectRemoved.close();
 });
 
+test('şifreli mevcut token ikinci telefondan alınır ve OAuth aynı tokenı teslim eder', async (t) => {
+    const secret = 'existing-bearer-secret-never-rotate';
+    const clientId = 'cli_credential_share';
+    const email = 'credential-share@test.com', password = 'credential-share-password';
+    const first = await connectDevice('dev_credential_origin', 'credential-origin-device-secret', [{ clientId, secret, name: 'Shared AI' }]);
+    t.after(() => first.close());
+    const account = await appSignUp(first, email, password);
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    assert.equal((await form(operator, '/admin/accounts/plan', { accountId: account.accountId, plan: 'pro' })).status, 303);
+    const second = await connectDevice('dev_credential_backup', 'credential-backup-device-secret');
+    t.after(() => second.close());
+    assert.equal((await appApi(second, 'POST', '/api/v1/login', { email, password })).status, 200);
+    const endpoint = `/api/v1/sync/clients/${clientId}/credential`;
+    // Simulate the source phone encrypting the original secret with the account
+    // key. The relay is given neither key nor secret in this publication request.
+    const accountKey = crypto.pbkdf2Sync(password, `mcp-account-cookie-sync-v2|${account.accountId}`, 120000, 32, 'sha256');
+    const transferKey = crypto.createHmac('sha256', accountKey).update('mcp-client-credential-key-v1').digest();
+    const iv = crypto.randomBytes(12), hash = sha256(secret);
+    const cipher = crypto.createCipheriv('aes-256-gcm', transferKey, iv);
+    const aad = `credential-v1|${account.accountId.length}:${account.accountId}|${clientId.length}:${clientId}|${hash}`;
+    cipher.setAAD(Buffer.from(aad));
+    const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final(), cipher.getAuthTag()]);
+    const pkg = { version: 1, secretHash: hash, iv: iv.toString('base64'), ciphertext: encrypted.toString('base64'), cookieKeyRevision: 0 };
+    assert.equal((await appApi(first, 'PUT', endpoint, pkg)).status, 409, 'sync-off source published automatically');
+    await appApi(first, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: true, cookiesEnabled: false });
+    assert.equal((await appApi(first, 'PUT', endpoint, { ...pkg, secret })).status, 400, 'plaintext field accepted');
+    assert.equal((await appApi(first, 'PUT', endpoint, { ...pkg, iv: 'bad' })).status, 400);
+    assert.equal((await appApi(first, 'PUT', endpoint, pkg)).status, 200);
+    assert.equal((await appApi(second, 'GET', endpoint)).status, 404, 'unbound same-account device got package');
+    assert.deepEqual((await appApi(second, 'GET', '/api/v1/sync')).body.credentialPackages, []);
+    second.send({ type: 'client_added', clientId, secretHash: hash, name: 'Shared AI' });
+    await new Promise(r => setTimeout(r, 250));
+    assert.equal((await appApi(second, 'PUT', endpoint, pkg)).status, 409, 'backup replaced source package');
+    const download = await appApi(second, 'GET', endpoint);
+    assert.equal(download.status, 200, 'explicit retrieval required cookie or session sync');
+    const received = download.body.credentialPackage;
+    const bytes = Buffer.from(received.ciphertext, 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', transferKey, Buffer.from(received.iv, 'base64'));
+    decipher.setAAD(Buffer.from(aad));
+    decipher.setAuthTag(bytes.subarray(-16));
+    const restored = Buffer.concat([decipher.update(bytes.subarray(0, -16)), decipher.final()]).toString('utf8');
+    assert.equal(restored, secret);
+    assert.equal(received.secret, undefined);
+    assert.equal(JSON.stringify(download.body).includes(secret), false);
+    const inventory = (await appApi(second, 'GET', '/api/v1/sync')).body;
+    assert.equal(inventory.credentialSharingVersion, 1);
+    assert.equal(inventory.credentialPackages.length, 1);
+    assert.equal(inventory.clients.length, 0, 'key sharing implicitly published cloud restore inventory');
+    assert.equal(inventory.defaultDeviceId, '', 'key sharing elected a main device');
+    // Original browser credentials are unchanged, including when explicitly
+    // routing to the secondary's already bound profile.
+    assert.equal((await callTool(`${clientId}.${secret}`, { deviceId: 'dev_credential_origin' })).status, 200);
+    assert.equal((await callTool(`${clientId}.${restored}`, { deviceId: 'dev_credential_backup' })).status, 200);
+    const foreign = await connectDevice('dev_credential_foreign', 'credential-foreign-device-secret');
+    t.after(() => foreign.close());
+    await appSignUp(foreign, 'credential-foreign@test.com', 'credential-foreign-password');
+    assert.equal((await appApi(foreign, 'GET', endpoint)).status, 404);
+    assert.equal((await appApi(foreign, 'PUT', endpoint, pkg)).status, 409);
+    assert.deepEqual((await appApi(foreign, 'GET', '/api/v1/sync')).body.credentialPackages, []);
+    first.close();
+    assert.equal((await appApi(second, 'GET', endpoint)).status, 200, 'source must not stay online after publication');
+    second.send({ type: 'oauth_pairing_request', clientId, clientSecret: restored });
+    const pairing = await second.next('oauth_pairing_code');
+    assert.equal(pairing.status, 'ok');
+    const redirectUri = 'http://127.0.0.1:9876/callback';
+    const registration = await fetch(`${BASE}/oauth/register`, { method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ redirect_uris: [redirectUri], client_name: 'Shared token test' }) });
+    assert.equal(registration.status, 201);
+    const oauthClient = await registration.json();
+    const verifier = crypto.randomBytes(48).toString('base64url');
+    const authorize = await fetch(`${BASE}/oauth/authorize`, { method: 'POST', redirect: 'manual',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ response_type: 'code', client_id: oauthClient.client_id,
+            redirect_uri: redirectUri, code: pairing.display, state: 'same-token', resource: BASE,
+            code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' }) });
+    assert.equal(authorize.status, 302);
+    const authCode = new URL(authorize.headers.get('location')).searchParams.get('code');
+    const exchanged = await fetch(`${BASE}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ grant_type: 'authorization_code', code: authCode, client_id: oauthClient.client_id,
+            redirect_uri: redirectUri, code_verifier: verifier }) });
+    assert.equal(exchanged.status, 200);
+    assert.equal((await exchanged.json()).access_token, `${clientId}.${secret}`);
+    assert.equal((await callTool(`${clientId}.${secret}`, { deviceId: 'dev_credential_backup' })).status, 200);
+    // Storage and audit contain only the ciphertext/hash, never the shared key.
+    await new Promise(r => setTimeout(r, 350));
+    assert.equal(fs.readFileSync(stateFile, 'utf8').includes(secret), false);
+    assert.equal(fs.readFileSync(stateFile, 'utf8').includes(accountKey.toString('base64')), false);
+    assert.equal(JSON.stringify((await appApi(second, 'GET', '/api/v1/audit')).body).includes(secret), false);
+    assert.equal((await appApi(second, 'POST', '/api/v1/account/password', { current: password,
+        next: 'replacement-password-without-envelope', logoutOtherDevices: false })).status, 409);
+    await appApi(second, 'POST', '/api/v1/logout');
+    assert.equal((await appApi(second, 'GET', endpoint)).status, 403);
+});
+
 test('askıya alınan hesabın anahtarları anında durur', async () => {
     const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
 

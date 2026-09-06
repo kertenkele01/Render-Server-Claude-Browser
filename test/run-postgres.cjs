@@ -5,5 +5,5 @@ if (!process.env.TEST_DATABASE_URL) {
     process.exit(1);
 }
 const result = spawnSync(process.execPath, ['--test', '--test-concurrency=1',
-    'test/main-device.test.js', 'test/sync-safety.test.js'], { stdio: 'inherit', env: process.env, windowsHide: true });
+    'test/main-device.test.js', 'test/sync-safety.test.js', 'test/credential-sharing.test.js'], { stdio: 'inherit', env: process.env, windowsHide: true });
 process.exit(result.status ?? 1);

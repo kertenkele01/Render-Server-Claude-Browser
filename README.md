@@ -89,8 +89,18 @@ bir yetki vermez; hedef belirtilmezse sessiz bir yedek telefona geçilmez.
 `/api/v1/sync`, uygulamaya hesap cihazlarını ve bağlantı kimliği/hash bilgisini
 döndürür; düz metin token hiçbir zaman bu API'ye veya kalıcı röle deposuna
 girmez. Yeni telefon hash'i yerelde saklayarak mevcut token'ı doğrular ve
-izinleri güvenli varsayılanlarla başlatır. Çerezler ile web sitesi girişleri bu
-akışın parçası değildir ve cihazda kalır.
+izinleri güvenli varsayılanlarla başlatır.
+
+AI oturumu eşitlemesi açık kaynak telefon, mevcut Bearer anahtarını hesap veri
+anahtarıyla şifreleyip `credential_packages` içinde paylaşabilir. Röle yalnızca
+IV, şifreli içerik ve doğrulama metadatasını saklar. Aynı hesaba bağlı ve ilgili
+bağlantıya yönlendirme bağı bulunan başka bir telefon paketi alır, düz metni
+yerelde hash ile doğrular ve aynı anahtarı gösterir veya bu anahtar için OAuth
+kodu ister. Token değişmediği için eski AI bağlantıları çalışmaya devam eder.
+Anahtarı yenileme yetkisi yalnızca onu üreten telefonda kalır.
+
+Çerez paketleri ayrı bir eşitleme seçeneğidir; Bearer anahtarının paylaşılması
+çerez eşitlemesini veya ana cihaz seçimini gerektirmez.
 
 ### Depolama
 

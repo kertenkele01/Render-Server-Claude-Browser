@@ -2845,17 +2845,20 @@ app.post('/api/v1/account/main-device/ready', async (req, res) => {
  * and the relay still never stores or returns the plaintext secret.
  */
 async function accountSyncSnapshot(device) {
-    const [account, ownedDevices, ownedClients, cookieSnapshots] = await Promise.all([
+    const [account, ownedDevices, ownedClients, cookieSnapshots, credentialPackages] = await Promise.all([
         store.getAccountById(device.accountId),
         store.listDevices(device.accountId),
         store.listClients(device.accountId),
-        store.listCookieSnapshots(device.accountId)
+        store.listCookieSnapshots(device.accountId),
+        store.listCredentialPackages(device.accountId, device.id)
     ]);
     const cookiesByClient = new Map(cookieSnapshots.map((row) => [row.clientId, row]));
     // The routing registry exists even for local-only devices. Only the main
     // phone explicitly publishes connections into the cloud restore inventory.
     const syncedClients = ownedClients.filter((row) => row.cloudPublished === true);
     return {
+        credentialSharingVersion: 1,
+        credentialPackages,
         mainGeneration: account?.mainGeneration || 0,
         cookieKeyRevision: account?.cookieKeyRevision || 0,
         mainReady: account?.mainReady === true,
@@ -2912,6 +2915,46 @@ async function requireAccountSync(req, res) {
 app.get('/api/v1/sync', async (req, res) => {
     const snapshot = await requireAccountSync(req, res);
     if (snapshot) res.json(snapshot);
+});
+
+// Only ciphertext crosses the storage boundary. A device still checks the
+// decrypted secret against its local hash before exposing it or offering OAuth.
+app.get('/api/v1/sync/clients/:clientId/credential', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Anahtarı almak için hesabınıza giriş yapın.' });
+    const packages = await store.listCredentialPackages(device.accountId, device.id);
+    const pkg = packages.find(p => p.clientId === req.params.clientId);
+    res.set('Cache-Control', 'no-store');
+    if (!pkg) return res.status(404).json({ error: 'credential_not_available',
+        message: 'Anahtar henüz paylaşılmadı. Oturumu oluşturan telefonda güncel uygulamayı açıp AI oturumu senkronizasyonunu etkinleştirin; ardından tekrar deneyin. Mevcut token değişmez.' });
+    res.json({ credentialPackage: pkg });
+});
+
+app.put('/api/v1/sync/clients/:clientId/credential', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
+    const body = req.body || {};
+    const allowed = ['version', 'secretHash', 'iv', 'ciphertext', 'cookieKeyRevision'];
+    const base64 = /^[A-Za-z0-9+/]+={0,2}$/;
+    if (Object.keys(body).some(k => !allowed.includes(k)) || body.version !== 1 ||
+        typeof body.secretHash !== 'string' || !/^[a-f0-9]{64}$/.test(body.secretHash) ||
+        typeof body.iv !== 'string' || body.iv.length !== 16 || !base64.test(body.iv) ||
+        Buffer.from(body.iv, 'base64').length !== 12 ||
+        typeof body.ciphertext !== 'string' || body.ciphertext.length < 24 || body.ciphertext.length > 2048 ||
+        !base64.test(body.ciphertext) || Buffer.from(body.ciphertext, 'base64').length < 17 ||
+        !Number.isSafeInteger(body.cookieKeyRevision) || body.cookieKeyRevision < 0) {
+        return res.status(400).json({ error: 'invalid_credential_package', message: 'Şifreli anahtar paketi geçersiz. Uygulamayı güncelleyin.' });
+    }
+    const stored = await store.writeCredentialPackage({
+        clientId: req.params.clientId, accountId: device.accountId, sourceDeviceId: device.id,
+        version: body.version, secretHash: body.secretHash, iv: body.iv, ciphertext: body.ciphertext,
+        cookieKeyRevision: body.cookieKeyRevision, updatedAt: Date.now()
+    });
+    if (!stored) return res.status(409).json({ error: 'credential_share_conflict',
+        message: 'Anahtarı yalnızca kaynak cihaz, AI oturumu eşitlemesi açıkken paylaşabilir. Hesap bilgilerini yenileyip tekrar deneyin.' });
+    res.json({ status: 'ok' });
 });
 
 // The envelope is encrypted on the phone with the password-derived key. Keeping
