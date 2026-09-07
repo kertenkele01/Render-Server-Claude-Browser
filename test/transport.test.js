@@ -159,7 +159,8 @@ test.before(async () => {
             PORT: String(PORT),
             DATABASE_URL: '',
             BRIDGE_STATE_FILE: stateFile,
-            ALLOW_REGISTRATION: 'true'
+            ALLOW_REGISTRATION: 'true',
+            LIMIT_SSE_CHANNELS_FREE: '1'
         },
         stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -296,6 +297,23 @@ test('sunucu kaynaklı akış sunulmadığı açıkça söylenir', async () => {
         headers: { authorization: `Bearer ${TOKEN}` }
     });
     assert.equal(ended.status, 200);
+});
+
+test('SSE bağlantı sınırı akış başlamadan temiz bir 429 döndürür', async () => {
+    const controller = new AbortController();
+    const first = await fetch(`${BASE}/sse`, {
+        headers: { authorization: `Bearer ${TOKEN}`, accept: 'text/event-stream' },
+        signal: controller.signal
+    });
+    assert.equal(first.status, 200);
+
+    const refused = await fetch(`${BASE}/sse`, {
+        headers: { authorization: `Bearer ${TOKEN}`, accept: 'text/event-stream' }
+    });
+    assert.equal(refused.status, 429);
+    assert.equal((await refused.json()).error, 'too_many_channels');
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 50));
 });
 
 // --- the two transports must agree ----------------------------------------

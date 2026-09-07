@@ -379,6 +379,11 @@ test('telefondaki kodla tam akış çalışır ve jeton komut çalıştırır', 
     });
     const page = await fetch(`${BASE}/oauth/authorize?${query}`);
     assert.equal(page.status, 200);
+    assert.equal(page.headers.get('x-frame-options'), 'DENY');
+    assert.match(page.headers.get('content-security-policy') || '', /frame-ancestors 'none'/);
+    assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(page.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(page.headers.get('cache-control'), 'no-store');
     const html = await page.text();
     assert.match(html, /Claude Code \(test\)/);
     // The page's whole surface is one code field. No credential is ever typed

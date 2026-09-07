@@ -70,7 +70,17 @@ app.use((req, res, next) => {
 });
 
 const server = createServer(app);
-const wss = new WebSocketServer({ noServer: true });
+function positiveEnv(name, fallback) {
+    const value = Number.parseInt(process.env[name] || '', 10);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+const MAX_WS_PAYLOAD_BYTES = positiveEnv('MAX_WS_PAYLOAD_BYTES', 1024 * 1024);
+const MAX_UNAUTH_WS_GLOBAL = positiveEnv('MAX_UNAUTH_WS_GLOBAL', 64);
+const MAX_UNAUTH_WS_PER_IP = positiveEnv('MAX_UNAUTH_WS_PER_IP', 8);
+const MAX_SSE_CHANNELS_GLOBAL = positiveEnv('MAX_SSE_CHANNELS_GLOBAL', 500);
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD_BYTES });
+let unauthenticatedWebSockets = 0;
+const unauthenticatedWebSocketsByIp = new Map();
 
 // Active connections
 const browsers = new Map();        // deviceId -> live WebSocket
@@ -1300,6 +1310,15 @@ server.on('upgrade', (request, socket, head) => {
         socket.destroy();
         return;
     }
+    const ip = limits.clientIp(request);
+    const attempt = limits.hit('websocket', ip);
+    const openForIp = unauthenticatedWebSocketsByIp.get(ip) || 0;
+    if (!attempt.allowed || unauthenticatedWebSockets >= MAX_UNAUTH_WS_GLOBAL || openForIp >= MAX_UNAUTH_WS_PER_IP) {
+        const retryAfter = attempt.retryAfterSeconds || 10;
+        socket.write(`HTTP/1.1 429 Too Many Requests\r\nRetry-After: ${retryAfter}\r\nConnection: close\r\n\r\n`);
+        socket.destroy();
+        return;
+    }
     wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
     });
@@ -1307,9 +1326,24 @@ server.on('upgrade', (request, socket, head) => {
 
 
 // WebSocket Server Handler (for the Android app)
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, request) => {
     let deviceId = null;      // set only after a verified register
     let authenticated = false;
+    const connectionIp = limits.clientIp(request);
+    let holdsUnauthenticatedSlot = true;
+    unauthenticatedWebSockets++;
+    unauthenticatedWebSocketsByIp.set(
+        connectionIp,
+        (unauthenticatedWebSocketsByIp.get(connectionIp) || 0) + 1
+    );
+    const releaseUnauthenticatedSlot = () => {
+        if (!holdsUnauthenticatedSlot) return;
+        holdsUnauthenticatedSlot = false;
+        unauthenticatedWebSockets = Math.max(0, unauthenticatedWebSockets - 1);
+        const remaining = Math.max(0, (unauthenticatedWebSocketsByIp.get(connectionIp) || 1) - 1);
+        if (remaining === 0) unauthenticatedWebSocketsByIp.delete(connectionIp);
+        else unauthenticatedWebSocketsByIp.set(connectionIp, remaining);
+    };
 
     // Drop sockets that never identify themselves.
     const authDeadline = setTimeout(() => {
@@ -1385,6 +1419,8 @@ wss.on('connection', (ws) => {
             deviceId = id;
             authenticated = true;
             clearTimeout(authDeadline);
+            releaseUnauthenticatedSlot();
+            limits.reset('websocket', connectionIp);
 
             // The device is the authority on which clients exist. Rebuild its
             // slice of the registry from what it just told us.
@@ -1597,6 +1633,7 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         clearTimeout(authDeadline);
+        releaseUnauthenticatedSlot();
         if (deviceId && browsers.get(deviceId) === ws) {
             browsers.delete(deviceId);
             // An outstanding pairing code holds a plaintext secret and only
@@ -1644,6 +1681,18 @@ app.get('/sse', (req, res) => {
     const auth = requireAuth(req, res);
     if (!auth) return;
 
+    const plan = limits.planFor(auth.account);
+    const openForClient = [...sseSessions.values()].filter((sess) => sess.clientId === auth.clientId).length;
+    if (openForClient >= plan.maxSseChannelsPerClient || sseSessions.size >= MAX_SSE_CHANNELS_GLOBAL) {
+        res.setHeader('Retry-After', '10');
+        return res.status(429).json({
+            error: 'too_many_channels',
+            message: openForClient >= plan.maxSseChannelsPerClient
+                ? `Bu anahtar için aynı anda en fazla ${plan.maxSseChannelsPerClient} kanal açılabilir. Kullanılmayan MCP istemcilerini kapatın.`
+                : 'Sunucu eşzamanlı bağlantı sınırına ulaştı. Kısa süre sonra tekrar deneyin.'
+        });
+    }
+
     // The session id is random, not derived from the credential. Knowing a
     // session id must never be enough to speak on that session's behalf.
     const sessionId = randomUUID();
@@ -1660,24 +1709,11 @@ app.get('/sse', (req, res) => {
         res.write(':\n\n');
     }, 15000);
 
-    const plan = limits.planFor(auth.account);
-    const openForClient = [...sseSessions.values()].filter((sess) => sess.clientId === auth.clientId).length;
-    if (openForClient >= plan.maxSseChannelsPerClient) {
-        // An abandoned SSE channel holds a response object open forever; a
-        // client that reconnects in a loop without closing would grow the map
-        // until the process died.
-        return res.status(429).json({
-            error: 'too_many_channels',
-            message: `Bu anahtar için aynı anda en fazla ${plan.maxSseChannelsPerClient} kanal açılabilir. Kullanılmayan MCP istemcilerini kapatın.`
-        });
-    }
-
     sseSessions.set(sessionId, {
         res,
         clientId: auth.clientId,
         deviceId: auth.record.deviceId,
         accountId: auth.record.accountId || null,
-        secret: auth.secret,
         clientName: auth.record.name,
         clientInfo: { name: auth.record.name },
         openedAt: Date.now()
@@ -2376,7 +2412,17 @@ function authorizeHidden(parsed) {
     };
 }
 
+function oauthAuthorizeHeaders(res) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Security-Policy',
+        "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+}
+
 app.get('/oauth/authorize', async (req, res) => {
+    oauthAuthorizeHeaders(res);
     const parsed = await readAuthorizeRequest(req.query || {}, oauth.originOf(req));
     if (parsed.fail) {
         return res.status(400).send(oauth.renderAuthorizePage({
@@ -2389,7 +2435,6 @@ app.get('/oauth/authorize', async (req, res) => {
         return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description, parsed.issuer);
     }
 
-    res.setHeader('Cache-Control', 'no-store');
     return res.send(oauth.renderAuthorizePage({
         clientName: parsed.record.name,
         hidden: authorizeHidden(parsed)
@@ -2397,6 +2442,7 @@ app.get('/oauth/authorize', async (req, res) => {
 });
 
 app.post('/oauth/authorize', async (req, res) => {
+    oauthAuthorizeHeaders(res);
     // Claude's hosted connector browser can submit only the visible code field
     // and omit hidden inputs. The form action carries the same OAuth context in
     // its query string, so merge both sources with the submitted body winning.
@@ -2972,7 +3018,13 @@ app.get('/api/v1/sync/key-envelope', async (req, res) => {
     if (!device) return;
     if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
     const account = await store.getAccountById(device.accountId);
-    res.json({ envelope: account.cookieKeyEnvelope || null, revision: account.cookieKeyRevision || 0 });
+    let envelope = account.cookieKeyEnvelope || null;
+    const supportedVersion = Number.parseInt(req.headers['x-cookie-key-envelope-version'] || '1', 10);
+    // Version 2 stores both wrappers. Updated apps use the stronger wrapper;
+    // older installed apps receive the legacy wrapper and keep working until
+    // they update, without weakening the wrapper selected by new apps.
+    if (envelope?.version === 2 && supportedVersion < 2) envelope = envelope.legacy;
+    res.json({ envelope, revision: account.cookieKeyRevision || 0 });
 });
 
 app.get('/api/v1/sync/cookie-backups', async (req, res) => {
@@ -3279,11 +3331,29 @@ app.post('/api/v1/account/password', async (req, res) => {
 
     const { passwordHash, passwordSalt } = await accounts.hashPassword(next);
     const suppliedEnvelope = req.body?.cookieKeyEnvelope || null;
-    if (suppliedEnvelope && (suppliedEnvelope.version !== 1 || !/^[A-Za-z0-9+/]{16}$/.test(suppliedEnvelope.iv || '') ||
-        !/^[A-Za-z0-9+/]{64}$/.test(suppliedEnvelope.ciphertext || ''))) {
+    const validEnvelopePart = (part) => part && /^[A-Za-z0-9+/]{16}$/.test(part.iv || '') &&
+        /^[A-Za-z0-9+/]{64}$/.test(part.ciphertext || '');
+    const validLegacy = suppliedEnvelope?.version === 1 && validEnvelopePart(suppliedEnvelope);
+    const validStrong = suppliedEnvelope?.version === 2 && validEnvelopePart(suppliedEnvelope.strong) &&
+        suppliedEnvelope.legacy?.version === 1 && validEnvelopePart(suppliedEnvelope.legacy);
+    if (suppliedEnvelope && !validLegacy && !validStrong) {
         return res.status(400).json({ error: 'invalid_key_envelope', message: 'Şifreli anahtar paketi geçersiz.' });
     }
-    const envelope = suppliedEnvelope ? { version: 1, iv: suppliedEnvelope.iv, ciphertext: suppliedEnvelope.ciphertext } : null;
+    if (account.cookieKeyEnvelope?.version === 2 && suppliedEnvelope?.version !== 2) {
+        return res.status(409).json({
+            error: 'key_envelope_upgrade_required',
+            message: 'Yedek anahtarı güçlendirilmiş biçimde saklanıyor. Parolayı değiştirmek için uygulamayı güncelleyin.'
+        });
+    }
+    const envelope = validStrong ? {
+        version: 2,
+        strong: { iv: suppliedEnvelope.strong.iv, ciphertext: suppliedEnvelope.strong.ciphertext },
+        legacy: { version: 1, iv: suppliedEnvelope.legacy.iv, ciphertext: suppliedEnvelope.legacy.ciphertext }
+    } : validLegacy ? {
+        version: 1,
+        iv: suppliedEnvelope.iv,
+        ciphertext: suppliedEnvelope.ciphertext
+    } : null;
     const revision = req.body?.cookieKeyRevision ?? 0;
     if (!Number.isSafeInteger(revision) || !await store.changePasswordWithCookieKey(account.id,
         account.passwordHash, passwordHash, passwordSalt, envelope, revision)) {

@@ -164,12 +164,13 @@ function connectDevice(deviceId, deviceSecret, clients = []) {
 }
 
 /** Calls the app API the way the Android client does. */
-async function appApi(device, method, url, body) {
+async function appApi(device, method, url, body, extraHeaders = {}) {
     const res = await fetch(BASE + url, {
         method,
         headers: {
             authorization: `Bearer ${device.credential}`,
-            ...(body ? { 'content-type': 'application/json' } : {})
+            ...(body ? { 'content-type': 'application/json' } : {}),
+            ...extraHeaders
         },
         body: body ? JSON.stringify(body) : undefined
     });
@@ -874,6 +875,24 @@ test('şifreli anahtar geçişi ve kapalı eşitlemede bulut yedeği yönetimi h
     assert.deepEqual((await appApi(device, 'GET', '/api/v1/sync/key-envelope')).body, { envelope, revision: 1 });
     assert.equal((await appApi(device, 'PUT', '/api/v1/sync/clients/cli_safety/cookies', packageBody)).status, 409);
     assert.equal((await appApi(device, 'PUT', '/api/v1/sync/clients/cli_safety/cookies', { ...packageBody, cookieKeyRevision: 1 })).status, 200);
+    const strongEnvelope = {
+        version: 2,
+        strong: { iv: Buffer.alloc(12, 3).toString('base64'), ciphertext: Buffer.alloc(48, 4).toString('base64') },
+        legacy: envelope
+    };
+    assert.equal((await appApi(device, 'POST', '/api/v1/account/password', {
+        current: 'safety-password-new', next: 'safety-password-newer',
+        cookieKeyEnvelope: strongEnvelope, cookieKeyRevision: 1
+    })).status, 200);
+    assert.deepEqual((await appApi(device, 'GET', '/api/v1/sync/key-envelope')).body,
+        { envelope, revision: 2 }, 'eski uygulama uyumlu sarmalayıcıyı almalı');
+    assert.deepEqual((await appApi(device, 'GET', '/api/v1/sync/key-envelope', null,
+        { 'x-cookie-key-envelope-version': '2' })).body,
+        { envelope: strongEnvelope, revision: 2 }, 'güncel uygulama güçlendirilmiş sarmalayıcıyı almalı');
+    assert.equal((await appApi(device, 'POST', '/api/v1/account/password', {
+        current: 'safety-password-newer', next: 'unsafe-downgrade',
+        cookieKeyEnvelope: envelope, cookieKeyRevision: 2
+    })).status, 409, 'eski uygulama güçlü sarmalayıcıyı düşürmemeli');
     await appApi(device, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: false, cookiesEnabled: false });
     const list = await appApi(device, 'GET', '/api/v1/sync/cookie-backups');
     assert.equal(list.status, 200);
