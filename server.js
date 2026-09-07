@@ -2618,6 +2618,14 @@ app.all(['/mcp/tools/browser_get_tool_documentation', '/tools/browser_get_tool_d
 // longer on the user's path.
 // ----------------------------------------------------
 
+// Account metadata, client hashes and encrypted packages are private even
+// though the relay cannot decrypt them. Make the cache policy explicit for
+// browsers, proxies and hosting layers.
+app.use('/api/v1', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+});
+
 /** Verifies the phone's own credential. Returns the device record or null. */
 function requireDevice(req, res) {
     const ip = limits.clientIp(req);

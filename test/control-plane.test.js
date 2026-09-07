@@ -175,7 +175,7 @@ async function appApi(device, method, url, body) {
     });
     let payload = null;
     try { payload = await res.json(); } catch (e) { /* empty body */ }
-    return { status: res.status, body: payload };
+    return { status: res.status, body: payload, headers: res.headers };
 }
 
 /** Signs a phone up from the app — the normal user's entire onboarding. */
@@ -395,6 +395,7 @@ test('bir hesap diğerinin verisini hiçbir uçtan göremez', async () => {
         'başka hesabın olayı denetim kaydında göründü');
 
     const mineSync = await appApi(mine, 'GET', '/api/v1/sync');
+    assert.equal(mineSync.headers.get('cache-control'), 'no-store');
     assert.deepEqual(mineSync.body.devices.map((d) => d.deviceId), ['dev_izole_1']);
     assert.ok(mineSync.body.clients.every((c) => !c.deviceIds.includes('dev_izole_2')),
         'başka hesabın istemci bağı senkronizasyon görünümünde göründü');
