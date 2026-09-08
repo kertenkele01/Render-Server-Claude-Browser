@@ -697,7 +697,7 @@ test('şifreli mevcut token ikinci telefondan alınır ve OAuth aynı tokenı te
         body: new URLSearchParams({ response_type: 'code', client_id: oauthClient.client_id,
             redirect_uri: redirectUri, code: pairing.display, state: 'same-token', resource: BASE,
             code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' }) });
-    assert.equal(authorize.status, 302);
+    assert.equal(authorize.status, 303);
     const authCode = new URL(authorize.headers.get('location')).searchParams.get('code');
     const exchanged = await fetch(`${BASE}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ grant_type: 'authorization_code', code: authCode, client_id: oauthClient.client_id,

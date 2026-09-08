@@ -2528,7 +2528,13 @@ app.post('/oauth/authorize', async (req, res) => {
     url.searchParams.set('code', authCode);
     if (parsed.state) url.searchParams.set('state', parsed.state);
     url.searchParams.set('iss', parsed.issuer);
-    return res.redirect(302, url.toString());
+    // This response follows an HTML form POST. A 302 leaves POST-to-GET
+    // rewriting to the user agent; Claude's hosted OAuth browser has been
+    // observed reaching its GET-only callback as POST, where the callback
+    // silently stalls or returns Method Not Allowed. 303 defines the next
+    // request as GET, so the callback receives the authorization code in the
+    // form it advertises.
+    return res.redirect(303, url.toString());
 });
 
 // --- token -----------------------------------------------------------------

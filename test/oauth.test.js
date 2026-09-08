@@ -415,7 +415,8 @@ test('telefondaki kodla tam akış çalışır ve jeton komut çalıştırır', 
         { code: offer.display.toLowerCase() },
         authorizationContext
     );
-    assert.equal(submitted.status, 302);
+    assert.equal(submitted.status, 303,
+        'form POST sonrası callback kesin olarak GET olmalı');
 
     const location = new URL(submitted.headers.get('location'));
     assert.equal(location.origin + location.pathname, 'http://127.0.0.1:9876/callback');
@@ -472,7 +473,7 @@ test('kod tek kullanımlık', async () => {
         code: offer.code
     };
 
-    assert.equal((await submitAuthorize(fields)).status, 302);
+    assert.equal((await submitAuthorize(fields)).status, 303);
 
     // A code that survived its own use would let anyone who saw it on screen
     // pair a second client of their own.
