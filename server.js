@@ -2252,6 +2252,16 @@ const oauthPairings = oauth.createEphemeralStore(oauth.PAIRING_TTL_MS);
 const oauthAuthCodes = oauth.createEphemeralStore(oauth.AUTH_CODE_TTL_MS, 15 * 1000);
 
 /**
+ * pairing code -> the one callback already created from it.
+ *
+ * This does not make a phone code authorize twice. It only lets the exact same
+ * Claude authorization request repeat its transition while the single-use
+ * authorization code is still pending. The token endpoint remains the only
+ * place that releases the credential and consumes that code once.
+ */
+const oauthPendingCallbacks = oauth.createEphemeralStore(oauth.AUTH_CODE_TTL_MS, 15 * 1000);
+
+/**
  * A pairing offer only makes sense while the phone that made it is reachable.
  * Dropping them on disconnect also means a code cannot outlive the session it
  * was created in, which is the shortest honest lifetime for something holding a
@@ -2421,6 +2431,36 @@ function oauthAuthorizeHeaders(res) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
 }
 
+function isClaudeCallback(value) {
+    try {
+        const host = new URL(value).hostname.toLowerCase();
+        return host === 'claude.ai' || host.endsWith('.claude.ai') ||
+            host === 'claude.com' || host.endsWith('.claude.com');
+    } catch (e) {
+        return false;
+    }
+}
+
+function samePendingAuthorization(pending, parsed) {
+    return pending &&
+        pending.oauthClientId === parsed.clientId &&
+        pending.redirectUri === parsed.redirectUri &&
+        pending.codeChallenge === parsed.challenge &&
+        pending.state === parsed.state &&
+        pending.resource === parsed.resource;
+}
+
+function sendAuthorizationCallback(res, callbackUrl) {
+    if (!isClaudeCallback(callbackUrl)) return res.redirect(303, callbackUrl);
+
+    // A fresh document navigation avoids Claude's hosted connector carrying the
+    // form POST method into its GET-only callback. Refresh, meta refresh,
+    // top-level JavaScript navigation and a visible link cover the different
+    // embedded-browser behaviours seen in Claude web and desktop.
+    res.setHeader('Refresh', `0; url=${callbackUrl}`);
+    return res.status(200).send(oauth.renderOAuthRedirectPage(callbackUrl));
+}
+
 app.get('/oauth/authorize', async (req, res) => {
     oauthAuthorizeHeaders(res);
     const parsed = await readAuthorizeRequest(req.query || {}, oauth.originOf(req));
@@ -2481,6 +2521,11 @@ app.post('/oauth/authorize', async (req, res) => {
         }));
     }
 
+    const pending = isClaudeCallback(parsed.redirectUri) ? oauthPendingCallbacks.peek(code) : null;
+    if (samePendingAuthorization(pending, parsed)) {
+        return sendAuthorizationCallback(res, pending.callbackUrl);
+    }
+
     // Single-use: `take` removes it whether or not the rest succeeds, so a code
     // cannot be tried twice with two different clients.
     const pairing = oauthPairings.take(code);
@@ -2512,7 +2557,8 @@ app.post('/oauth/authorize', async (req, res) => {
         codeChallenge: parsed.challenge,
         clientId: pairing.clientId,
         secret: pairing.secret,
-        resource: parsed.resource
+        resource: parsed.resource,
+        pairingCode: code
     });
 
     addLog(
@@ -2528,13 +2574,18 @@ app.post('/oauth/authorize', async (req, res) => {
     url.searchParams.set('code', authCode);
     if (parsed.state) url.searchParams.set('state', parsed.state);
     url.searchParams.set('iss', parsed.issuer);
-    // This response follows an HTML form POST. A 302 leaves POST-to-GET
-    // rewriting to the user agent; Claude's hosted OAuth browser has been
-    // observed reaching its GET-only callback as POST, where the callback
-    // silently stalls or returns Method Not Allowed. 303 defines the next
-    // request as GET, so the callback receives the authorization code in the
-    // form it advertises.
-    return res.redirect(303, url.toString());
+    const callbackUrl = url.toString();
+    if (isClaudeCallback(parsed.redirectUri)) {
+        oauthPendingCallbacks.put(code, {
+            oauthClientId: parsed.clientId,
+            redirectUri: parsed.redirectUri,
+            codeChallenge: parsed.challenge,
+            state: parsed.state,
+            resource: parsed.resource,
+            callbackUrl
+        });
+    }
+    return sendAuthorizationCallback(res, callbackUrl);
 });
 
 // --- token -----------------------------------------------------------------
@@ -2557,6 +2608,7 @@ app.post('/oauth/token', async (req, res) => {
             error_description: 'Yetkilendirme kodu geçersiz, kullanılmış ya da süresi dolmuş.'
         });
     }
+    if (grant.pairingCode) oauthPendingCallbacks.delete(grant.pairingCode);
 
     if (String(body.client_id || '') !== grant.oauthClientId) {
         return res.status(400).json({

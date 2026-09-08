@@ -451,6 +451,67 @@ test('telefondaki kodla tam akış çalışır ve jeton komut çalıştırır', 
     device.close();
 });
 
+test('Claude callback yeni GET gezinmesiyle açılır ve aynı geçiş kurtarılabilir', async () => {
+    const secret = 'istemci-sirri-claude-gecis-1';
+    const device = await connectDevice('dev_claude_gecis', 'cihaz-sirri-16-karakter', [
+        { clientId: 'cli_claude_gecis', secret, name: 'Claude geçiş' }
+    ]);
+    const redirectUri = 'https://claude.ai/api/mcp/auth_callback';
+    const registered = await registerOAuthClient([redirectUri]);
+    const pkce = newPkce();
+    const offer = await pairingCodeFor(device, 'cli_claude_gecis', secret);
+    const fields = {
+        response_type: 'code',
+        client_id: registered.body.client_id,
+        redirect_uri: redirectUri,
+        code_challenge: pkce.challenge,
+        code_challenge_method: 'S256',
+        state: 'claude-durum',
+        resource: BASE,
+        code: offer.code
+    };
+
+    const first = await submitAuthorize(fields);
+    assert.equal(first.status, 200, 'Claude için form POST sonucu geçiş belgesi olmalı');
+    const refresh = first.headers.get('refresh') || '';
+    assert.match(refresh, /^0; url=https:\/\/claude\.ai\/api\/mcp\/auth_callback\?/);
+    const callbackUrl = new URL(refresh.replace(/^0; url=/, ''));
+    assert.equal(callbackUrl.searchParams.get('state'), 'claude-durum');
+    const authCode = callbackUrl.searchParams.get('code');
+    assert.ok(authCode);
+
+    const html = await first.text();
+    assert.match(html, /Kod kabul edildi/);
+    assert.match(html, /Claude'a dön/);
+    assert.match(html, /window\.location\.replace\(target\)/);
+    assert.match(html, /http-equiv="refresh"/);
+
+    // The hosted dialog may submit the same form again when its first
+    // navigation is swallowed. It receives the same callback, not a second
+    // grant, while that one authorization code remains pending.
+    const repeated = await submitAuthorize(fields);
+    assert.equal(repeated.status, 200);
+    assert.equal(repeated.headers.get('refresh'), refresh);
+
+    const token = await exchange({
+        grant_type: 'authorization_code',
+        code: authCode,
+        client_id: registered.body.client_id,
+        redirect_uri: redirectUri,
+        code_verifier: pkce.verifier
+    });
+    assert.equal(token.status, 200);
+    assert.equal(token.body.access_token, `cli_claude_gecis.${secret}`);
+
+    // Once the authorization code is exchanged, the recovery transition is
+    // removed as well; the phone code never yields a second access grant.
+    const afterExchange = await submitAuthorize(fields);
+    assert.equal(afterExchange.status, 400);
+    assert.match(await afterExchange.text(), /geçersiz ya da süresi dolmuş/i);
+
+    device.close();
+});
+
 // --- the seams -------------------------------------------------------------
 
 test('kod tek kullanımlık', async () => {
