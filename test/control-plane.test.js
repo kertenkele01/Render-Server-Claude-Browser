@@ -716,6 +716,66 @@ test('şifreli mevcut token ikinci telefondan alınır ve OAuth aynı tokenı te
     assert.equal((await appApi(second, 'GET', endpoint)).status, 403);
 });
 
+test('yedekte oluşturulan oturum ve yerel çerezler tek seferlik paketle ana cihaza devredilir', async () => {
+    const email = 'yedek-devir@test.com';
+    const password = 'yedek-devir-parolasi-uzun';
+    const clientId = 'cli_yedek_devir';
+    const secret = 'yedek-cihazda-uretilen-istemci-sirri';
+    const main = await connectDevice('dev_devir_main', 'devir-main-cihaz-sirri');
+    await appSignUp(main, email, password);
+    const selected = await appApi(main, 'POST', '/api/v1/account/main-device', { deviceId: 'dev_devir_main' });
+    await appApi(main, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: true, cookiesEnabled: true });
+
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const status = await (await visit(operator, '/api/status')).json();
+    const account = status.accounts.find(a => a.email === email);
+    assert.ok(account);
+    assert.equal((await form(operator, '/admin/accounts/plan', { accountId: account.id, plan: 'pro' })).status, 303);
+
+    const backup = await connectDevice('dev_devir_backup', 'devir-backup-cihaz-sirri', [
+        { clientId, secret, name: 'Yedekteki Oturum' }
+    ]);
+    assert.equal((await appApi(backup, 'POST', '/api/v1/login', { email, password })).status, 200);
+    await appApi(backup, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: true, cookiesEnabled: true });
+
+    const iv = Buffer.from('on-iki-byte-iv').toString('base64');
+    const ciphertext = Buffer.from('yedekteki-yerel-cerezlerin-sifreli-paketi').toString('base64');
+    const published = await appApi(backup, 'POST', `/api/v1/sync/clients/${clientId}/publish`, {
+        cookieSyncEnabled: true,
+        cookieHandoff: { version: 2, iv, ciphertext, cookieKeyRevision: 0 }
+    });
+    assert.equal(published.status, 200, JSON.stringify(published.body));
+    assert.equal(published.body.handoffQueued, true);
+
+    const backupView = await appApi(backup, 'GET', '/api/v1/sync');
+    assert.ok(backupView.body.clients.find(c => c.clientId === clientId));
+    assert.equal(backupView.body.clients.find(c => c.clientId === clientId).cookieHandoff, null,
+        'tek kullanımlık paket yedek cihaza geri açıldı');
+    const mainView = await appApi(main, 'GET', '/api/v1/sync');
+    const offered = mainView.body.clients.find(c => c.clientId === clientId);
+    assert.equal(offered.cookieHandoff.ciphertext, ciphertext);
+    assert.equal(offered.cookieSnapshot, null, 'ana cihaz uygulamadan devir paketi kalıcı yedeğe dönüştü');
+
+    main.send({ type: 'client_added', clientId, secretHash: sha256(secret), name: 'Yedekteki Oturum' });
+    await new Promise(r => setTimeout(r, 150));
+    assert.equal((await appApi(main, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`)).status, 200);
+    const accepted = await appApi(main, 'POST', `/api/v1/sync/clients/${clientId}/cookies/handoff/accept`, {
+        generation: selected.body.mainGeneration,
+        updatedAt: offered.cookieHandoff.updatedAt
+    });
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+    const after = (await appApi(main, 'GET', '/api/v1/sync')).body.clients.find(c => c.clientId === clientId);
+    assert.equal(after.cookieHandoff, null);
+    assert.equal(after.cookieSnapshot.ciphertext, ciphertext);
+    assert.equal(after.cookieSnapshot.lastWriterDeviceId, 'dev_devir_main');
+
+    assert.equal((await appApi(backup, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
+        version: 2, generation: selected.body.mainGeneration, iv, ciphertext, cookieKeyRevision: 0
+    })).status, 403, 'yedek cihaz normal ana-yazar yolundan paket yazdı');
+    main.close();
+    backup.close();
+});
+
 test('askıya alınan hesabın anahtarları anında durur', async () => {
     const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
 

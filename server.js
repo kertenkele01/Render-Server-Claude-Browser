@@ -2899,19 +2899,22 @@ app.post('/api/v1/account/main-device/ready', async (req, res) => {
  * and the relay still never stores or returns the plaintext secret.
  */
 async function accountSyncSnapshot(device) {
-    const [account, ownedDevices, ownedClients, cookieSnapshots, credentialPackages] = await Promise.all([
+    const [account, ownedDevices, ownedClients, cookieSnapshots, credentialPackages, cookieHandoffs] = await Promise.all([
         store.getAccountById(device.accountId),
         store.listDevices(device.accountId),
         store.listClients(device.accountId),
         store.listCookieSnapshots(device.accountId),
-        store.listCredentialPackages(device.accountId, device.id)
+        store.listCredentialPackages(device.accountId, device.id),
+        store.listCookieHandoffs(device.accountId, device.id)
     ]);
     const cookiesByClient = new Map(cookieSnapshots.map((row) => [row.clientId, row]));
+    const handoffsByClient = new Map(cookieHandoffs.map((row) => [row.clientId, row]));
     // The routing registry exists even for local-only devices. Only the main
     // phone explicitly publishes connections into the cloud restore inventory.
     const syncedClients = ownedClients.filter((row) => row.cloudPublished === true);
     return {
         credentialSharingVersion: 1,
+        cookieHandoffVersion: 1,
         credentialPackages,
         mainGeneration: account?.mainGeneration || 0,
         cookieKeyRevision: account?.cookieKeyRevision || 0,
@@ -2930,6 +2933,7 @@ async function accountSyncSnapshot(device) {
         })),
         clients: syncedClients.map((row) => {
             const encrypted = cookiesByClient.get(row.id);
+            const handoff = handoffsByClient.get(row.id);
             return {
                 clientId: row.id,
                 name: row.name || 'AI istemcisi',
@@ -2947,10 +2951,24 @@ async function accountSyncSnapshot(device) {
                     ciphertext: encrypted.ciphertext,
                     updatedAt: encrypted.updatedAt,
                     lastWriterDeviceId: encrypted.sourceDeviceId || ''
+                } : null,
+                cookieHandoff: handoff ? {
+                    version: handoff.version,
+                    iv: handoff.iv,
+                    ciphertext: handoff.ciphertext,
+                    updatedAt: handoff.updatedAt,
+                    lastWriterDeviceId: handoff.sourceDeviceId || ''
                 } : null
             };
         })
     };
+}
+
+async function notifyAccountSyncChanged(accountId) {
+    for (const d of await store.listDevices(accountId)) {
+        const ws = browsers.get(d.id);
+        if (ws) try { ws.send(JSON.stringify({ type: 'main_device_changed' })); } catch (_) { /* Reconnect refreshes metadata. */ }
+    }
 }
 
 async function requireAccountSync(req, res) {
@@ -3131,6 +3149,68 @@ app.post('/api/v1/sync/resolve', async (req, res) => {
     addLog(null, 'Uygulama', device.id, 'Senkronizasyon Yönü Seçildi', 'warning',
         strategy === 'cloud' ? 'Bulut verileri bu telefona uygulandı.' : 'Bu telefonun verileri bulut için kaynak seçildi.');
     res.json({ status: 'ok', strategy, ...(await accountSyncSnapshot(current)) });
+});
+
+/**
+ * An origin backup may explicitly publish one local connection. When the
+ * owner asks to include its current cookies, they are stored in a separate,
+ * single-use handoff slot. They never enter the normal main-writer path until
+ * the selected main phone has applied and accepted the encrypted package.
+ */
+app.post('/api/v1/sync/clients/:clientId/publish', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    if (!device.syncEnabled) return res.status(409).json({ error: 'device_sync_disabled', message: 'Önce bu telefonda AI oturumu eşitlemesini açın.' });
+    const body = req.body || {};
+    const allowed = ['cookieSyncEnabled', 'cookieHandoff'];
+    if (Object.keys(body).some(k => !allowed.includes(k)) || typeof body.cookieSyncEnabled !== 'boolean') {
+        return res.status(400).json({ error: 'invalid_publish_request', message: 'Oturum eşitleme isteği geçersiz.' });
+    }
+    const clientId = String(req.params.clientId || '');
+    const client = await store.getClient(clientId);
+    if (!client || client.accountId !== device.accountId || client.deviceId !== device.id ||
+        !boundDeviceIds(client).includes(device.id)) {
+        return res.status(403).json({ error: 'not_credential_origin', message: 'Bir oturumu buluta yalnızca onu oluşturan cihaz ekleyebilir.' });
+    }
+    let handoff = null;
+    if (body.cookieHandoff != null) {
+        if (!body.cookieSyncEnabled || !device.cookieSyncEnabled) {
+            return res.status(409).json({ error: 'device_cookie_sync_disabled', message: 'Yerel çerezleri devretmek için bu telefonda çerez eşitlemesini açın.' });
+        }
+        const h = body.cookieHandoff;
+        const base64 = /^[A-Za-z0-9+/]+={0,2}$/;
+        if (!h || Object.keys(h).some(k => !['version', 'iv', 'ciphertext', 'cookieKeyRevision'].includes(k)) ||
+            h.version !== 2 || typeof h.iv !== 'string' || h.iv.length < 16 || h.iv.length > 64 || !base64.test(h.iv) ||
+            typeof h.ciphertext !== 'string' || h.ciphertext.length < 24 || h.ciphertext.length > 350_000 || !base64.test(h.ciphertext) ||
+            !Number.isSafeInteger(h.cookieKeyRevision) || h.cookieKeyRevision < 0) {
+            return res.status(400).json({ error: 'invalid_cookie_handoff', message: 'Şifreli çerez devir paketi geçersiz.' });
+        }
+        handoff = { version: 2, iv: h.iv, ciphertext: h.ciphertext,
+            cookieKeyRevision: h.cookieKeyRevision, updatedAt: Date.now() };
+    }
+    const stored = await store.publishClientFromOrigin(device.accountId, device.id, clientId,
+        body.cookieSyncEnabled, handoff);
+    if (!stored) return res.status(409).json({ error: 'publish_conflict', message: 'Hesap, eşitleme veya şifreleme anahtarı değişti. Bilgileri yenileyip tekrar deneyin.' });
+    await refreshRegistryCache();
+    await notifyAccountSyncChanged(device.accountId);
+    res.json({ status: 'ok', clientId, handoffQueued: !!handoff });
+});
+
+app.post('/api/v1/sync/clients/:clientId/cookies/handoff/accept', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    const generation = Number(req.body?.generation);
+    const updatedAt = Number(req.body?.updatedAt);
+    if (!Number.isSafeInteger(generation) || generation < 0 || !Number.isSafeInteger(updatedAt) || updatedAt < 1) {
+        return res.status(400).json({ error: 'invalid_handoff_acceptance', message: 'Çerez devir onayı geçersiz.' });
+    }
+    const accepted = await store.acceptCookieHandoff(device.accountId, device.id,
+        String(req.params.clientId || ''), generation, updatedAt);
+    if (!accepted) return res.status(409).json({ error: 'handoff_changed', message: 'Ana cihaz, oturum bağlantısı veya devir paketi değişti. Yenileyip tekrar deneyin.' });
+    await notifyAccountSyncChanged(device.accountId);
+    res.json({ status: 'ok', clientId: accepted.clientId, updatedAt: accepted.updatedAt });
 });
 
 /**
