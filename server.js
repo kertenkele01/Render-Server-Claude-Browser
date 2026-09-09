@@ -2255,7 +2255,7 @@ const oauthAuthCodes = oauth.createEphemeralStore(oauth.AUTH_CODE_TTL_MS, 15 * 1
  * pairing code -> the one callback already created from it.
  *
  * This does not make a phone code authorize twice. It only lets the exact same
- * Claude authorization request repeat its transition while the single-use
+ * hosted authorization request repeat its transition while the single-use
  * authorization code is still pending. The token endpoint remains the only
  * place that releases the credential and consumes that code once.
  */
@@ -2441,6 +2441,19 @@ function isClaudeCallback(value) {
     }
 }
 
+function isChatGptCallback(value) {
+    try {
+        const host = new URL(value).hostname.toLowerCase();
+        return host === 'chatgpt.com' || host.endsWith('.chatgpt.com') || host === 'chat.openai.com';
+    } catch (e) {
+        return false;
+    }
+}
+
+function isHostedCallback(value) {
+    return isClaudeCallback(value) || isChatGptCallback(value);
+}
+
 function samePendingAuthorization(pending, parsed) {
     return pending &&
         pending.oauthClientId === parsed.clientId &&
@@ -2451,6 +2464,10 @@ function samePendingAuthorization(pending, parsed) {
 }
 
 function sendAuthorizationCallback(res, callbackUrl) {
+    // ChatGPT's hosted broker expects the conventional OAuth 302 it used
+    // before the Claude POST-method workaround. Keep that path separate: the
+    // two hosted callbacks do not process a form submission in the same way.
+    if (isChatGptCallback(callbackUrl)) return res.redirect(302, callbackUrl);
     if (!isClaudeCallback(callbackUrl)) return res.redirect(303, callbackUrl);
 
     // A fresh document navigation avoids Claude's hosted connector carrying the
@@ -2521,7 +2538,7 @@ app.post('/oauth/authorize', async (req, res) => {
         }));
     }
 
-    const pending = isClaudeCallback(parsed.redirectUri) ? oauthPendingCallbacks.peek(code) : null;
+    const pending = isHostedCallback(parsed.redirectUri) ? oauthPendingCallbacks.peek(code) : null;
     if (samePendingAuthorization(pending, parsed)) {
         return sendAuthorizationCallback(res, pending.callbackUrl);
     }
@@ -2575,7 +2592,7 @@ app.post('/oauth/authorize', async (req, res) => {
     if (parsed.state) url.searchParams.set('state', parsed.state);
     url.searchParams.set('iss', parsed.issuer);
     const callbackUrl = url.toString();
-    if (isClaudeCallback(parsed.redirectUri)) {
+    if (isHostedCallback(parsed.redirectUri)) {
         oauthPendingCallbacks.put(code, {
             oauthClientId: parsed.clientId,
             redirectUri: parsed.redirectUri,

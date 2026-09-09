@@ -512,6 +512,55 @@ test('Claude callback yeni GET gezinmesiyle açılır ve aynı geçiş kurtarıl
     device.close();
 });
 
+test('ChatGPT callback kendi beklediği 302 ile döner ve aynı geçiş kurtarılabilir', async () => {
+    const secret = 'istemci-sirri-chatgpt-gecis-1';
+    const device = await connectDevice('dev_chatgpt_gecis', 'cihaz-sirri-16-karakter', [
+        { clientId: 'cli_chatgpt_gecis', secret, name: 'ChatGPT geçiş' }
+    ]);
+    const redirectUri = 'https://chatgpt.com/connector_platform_oauth_redirect';
+    const registered = await registerOAuthClient([redirectUri]);
+    const pkce = newPkce();
+    const offer = await pairingCodeFor(device, 'cli_chatgpt_gecis', secret);
+    const fields = {
+        response_type: 'code',
+        client_id: registered.body.client_id,
+        redirect_uri: redirectUri,
+        code_challenge: pkce.challenge,
+        code_challenge_method: 'S256',
+        state: 'chatgpt-durum',
+        resource: BASE,
+        code: offer.code
+    };
+
+    const first = await submitAuthorize(fields);
+    assert.equal(first.status, 302, 'ChatGPT callback geleneksel OAuth 302 yanıtını bekliyor');
+    const location = first.headers.get('location') || '';
+    const callbackUrl = new URL(location);
+    assert.equal(callbackUrl.origin + callbackUrl.pathname, redirectUri);
+    assert.equal(callbackUrl.searchParams.get('state'), 'chatgpt-durum');
+    const authCode = callbackUrl.searchParams.get('code');
+    assert.ok(authCode);
+
+    const repeated = await submitAuthorize(fields);
+    assert.equal(repeated.status, 302);
+    assert.equal(repeated.headers.get('location'), location);
+
+    const token = await exchange({
+        grant_type: 'authorization_code',
+        code: authCode,
+        client_id: registered.body.client_id,
+        redirect_uri: redirectUri,
+        code_verifier: pkce.verifier
+    });
+    assert.equal(token.status, 200);
+    assert.equal(token.body.access_token, `cli_chatgpt_gecis.${secret}`);
+
+    const afterExchange = await submitAuthorize(fields);
+    assert.equal(afterExchange.status, 400);
+
+    device.close();
+});
+
 // --- the seams -------------------------------------------------------------
 
 test('kod tek kullanımlık', async () => {
