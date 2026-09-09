@@ -819,6 +819,42 @@ test('kısayol aracı röleden yönlendirilir', async () => {
     device.close();
 });
 
+test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async () => {
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const device = await connectDevice('dev_catalogue', 'cihaz-sirri-catalogue-16');
+    assert.ok(device.ack.catalog.categories.length > 0, 'kayıt yanıtında katalog yok');
+
+    const page = await visit(operator, '/admin/quick-links');
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /Hızlı Linkler/);
+
+    const updatePromise = device.next('quick_links_updated');
+    const saved = await form(operator, '/admin/quick-links/save', {
+        category: 'Uçuş',
+        categoryOrder: '50',
+        name: 'Test Bilet',
+        sortOrder: '1',
+        url: 'https://tickets.example/search?affiliate=bridge&campaign=ai',
+        description: 'AI bilet araması için',
+        active: '1'
+    });
+    assert.equal(saved.status, 303);
+
+    const update = await updatePromise;
+    const site = update.catalog.categories.flatMap((category) => category.sites)
+        .find((item) => item.name === 'Test Bilet');
+    assert.ok(site, 'yeni site canlı katalogda yok');
+    assert.equal(site.url, 'https://tickets.example/search?affiliate=bridge&campaign=ai');
+    assert.match(site.shortcutId, /^shortcut_/);
+
+    const refreshed = await visit(operator, '/admin/quick-links');
+    const html = await refreshed.text();
+    assert.match(html, /Test Bilet/);
+    assert.match(html, /affiliate=bridge&amp;campaign=ai/);
+
+    device.close();
+});
+
 test('kimlik bilgisi sorgu dizesinden kabul edilmez', async () => {
     const res = await fetch(`${BASE}/tools/browser_get_markdown?token=cli_mcp_1.istemci-sirri-uzun-yeterince`);
     assert.equal(res.status, 401, 'sorgu dizesindeki anahtar kabul edildi');

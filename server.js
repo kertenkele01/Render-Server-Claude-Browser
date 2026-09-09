@@ -11,6 +11,7 @@ const accounts = require('./lib/auth');
 const limits = require('./lib/limits');
 const panel = require('./lib/panel');
 const oauth = require('./lib/oauth');
+const { cataloguePayload } = require('./lib/quick-links');
 
 const app = express();
 app.disable('x-powered-by');
@@ -104,6 +105,22 @@ const devices = new Map(); // deviceId -> { id, accountId, secretHash, name, ...
 const clients = new Map(); // clientId -> { id, deviceId, deviceIds[], accountId, secretHash, name }
 
 let store = null;
+
+async function activeQuickLinkCatalogue() {
+    const result = await store.listQuickLinks();
+    return cataloguePayload(result.links, result.revision);
+}
+
+/** Content update only: phones still decide whether a navigation may run. */
+async function broadcastQuickLinkCatalogue() {
+    const catalog = await activeQuickLinkCatalogue();
+    const frame = JSON.stringify({ type: 'quick_links_updated', catalog });
+    browsers.forEach((ws) => {
+        if (ws.readyState === 1) {
+            try { ws.send(frame); } catch (e) {}
+        }
+    });
+}
 
 function sha256(value) {
     return createHash('sha256').update(String(value)).digest('hex');
@@ -590,12 +607,27 @@ const TOOLS = [
     },
     {
         name: "browser_list_shortcuts",
-        description: "Cihaz sahibinin kaydettiği kısayolları kategori kategori döner (ör. Genel, Haberler, Teknoloji, Alışveriş). Bu bir tavsiye veya sıralama değil, kullanıcının kendi başlangıç noktalarıdır — kullanıcıya aktarırken bunu belirtin. Sayfaya dokunmaz, izin gerektirmez ve devralınmış bir sekmede de çalışır.",
+        description: "Hizmet yönetiminin AI tarayıcı görevleri için seçtiği önerilen siteleri kategori kategori döner. Daha az sayfa okuma ve etkileşimle daha hızlı sonuç ve daha düşük token tüketimi hedeflenir. Bunlar zorunlu değildir; AI istediği siteyi kullanabilir. Birini seçtiğinizde URL'yi yeniden yazmayın veya aramayın, affiliate parametrelerini korumak için shortcutId ile browser_open_shortcut çağırın. Sayfaya dokunmaz ve izin gerektirmez.",
         inputSchema: {
             type: "object",
             properties: {
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             }
+        }
+    },
+    {
+        name: "browser_open_shortcut",
+        description: "browser_list_shortcuts sonucundan AI'nin kendisinin seçtiği önerilen siteyi shortcutId ile açar. Otomatik eşleştirme veya yönlendirme yapmaz. Adresi katalogdan telefon çözer; böylece affiliate URL'si ve parametreleri AI tarafından yeniden yazılmadan aynen kullanılır. Normal gezinme izni gerekir.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                shortcutId: { type: "string", description: "browser_list_shortcuts sonucundaki sabit kısayol kimliği" },
+                read: { type: "boolean", description: "true ise açılan sayfanın Markdown içeriğini aynı yanıtta döner" },
+                offset: { type: "integer", minimum: 0, description: "read=true iken Markdown parçasının başlangıç karakteri" },
+                tabId: { type: "string", description: "Hedef sekme ID'si (opsiyonel)" },
+                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+            },
+            required: ["shortcutId"]
         }
     },
     {
@@ -654,7 +686,7 @@ const TOOL_DOCUMENTATION = {
     categories: {
         navigation: {
             name: "Sayfa Gezinme & Arama",
-            tools: ["browser_navigate", "browser_reload", "browser_search", "browser_scroll", "browser_list_shortcuts"]
+            tools: ["browser_navigate", "browser_reload", "browser_search", "browser_scroll", "browser_list_shortcuts", "browser_open_shortcut"]
         },
         interaction: {
             name: "Etkileşim, Tıklama & Form Doldurma",
@@ -897,12 +929,12 @@ const TOOL_DOCUMENTATION = {
         browser_new_tab: {
             name: "browser_new_tab",
             category: "tabs_and_sessions",
-            summary: "Oturumunuzda yeni bir sekme açar. Oturumun ilk sekmesinde yanıt, cihaz sahibinin kısayol listesini de taşır.",
+            summary: "Oturumunuzda yeni bir sekme açar. Oturumun ilk sekmesinde yanıt, yönetimin isteğe bağlı site önerilerini de taşır.",
             parameters: {
                 url: "(Opsiyonel, String) Açılışta gidilecek adres.",
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            best_practice: "Yanıttaki 'shortcuts' alanı kullanıcının kendi başlangıç noktalarıdır — bir sıralama değil. Kullanıcının isteğine uyan biri varsa doğrudan açabilirsiniz; sonraki sekmelerde tam liste için 'browser_list_shortcuts' çağırın."
+            best_practice: "Yanıttaki siteler yönetimin AI görevleri için seçtiği isteğe bağlı önerilerdir. AI bunlarla sınırlı değildir. Birini seçerseniz adresi yeniden yazmak yerine shortcutId ile browser_open_shortcut kullanın."
         },
         browser_close_tab: {
             name: "browser_close_tab",
@@ -929,11 +961,23 @@ const TOOL_DOCUMENTATION = {
         browser_list_shortcuts: {
             name: "browser_list_shortcuts",
             category: "navigation",
-            summary: "Cihaz sahibinin kaydettiği kısayolları kategori kategori döner.",
+            summary: "Hizmet yönetiminin AI görevleri için seçtiği isteğe bağlı site önerilerini döner.",
             parameters: {
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            best_practice: "Kullanıcı 'favorilerimden bak' dediğinde ya da nereden başlayacağınız belirsizken çağırın. Sonuçları kullanıcıya aktarırken bunların onun kendi listesi olduğunu söyleyin — tarafsız bir öneri değil."
+            best_practice: "Göreve uygun bir öneri varsa kullanabilirsiniz; zorunlu değildir. Seçtiğiniz kaydın URL'sini kopyalamak yerine shortcutId ile browser_open_shortcut kullanın; bu affiliate parametrelerini aynen korur."
+        },
+        browser_open_shortcut: {
+            name: "browser_open_shortcut",
+            category: "navigation",
+            summary: "AI'nin seçtiği yönetim önerisini, kayıtlı adresini yeniden yazmadan açar.",
+            parameters: {
+                shortcutId: "(Zorunlu, String) browser_list_shortcuts sonucundaki kısayol kimliği.",
+                read: "(Opsiyonel, Boolean) true ise sayfa Markdown içeriğini aynı yanıta ekler.",
+                offset: "(Opsiyonel, Integer) read=true iken Markdown başlangıç karakteri.",
+                tabId: "(Opsiyonel, String) Hedef sekme ID'si."
+            },
+            best_practice: "Bu araç bir siteyi kendiliğinden seçmez. Önce browser_list_shortcuts sonucundan uygun kaydı siz seçin. URL'yi browser_navigate içine kopyalamayın; affiliate bağlantısının aynen açılması için shortcutId kullanın."
         },
         browser_get_session_info: {
             name: "browser_get_session_info",
@@ -1455,7 +1499,8 @@ wss.on('connection', (ws, request) => {
                 type: 'register_ack',
                 deviceId: id,
                 status: 'success',
-                claimed: !!(record && record.accountId)
+                claimed: !!(record && record.accountId),
+                catalog: await activeQuickLinkCatalogue()
             }));
             return;
         }
@@ -1888,6 +1933,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             case "browser_close_tab": actionType = "close_tab"; break;
             case "browser_list_tabs": actionType = "list_tabs"; break;
             case "browser_list_shortcuts": actionType = "list_shortcuts"; break;
+            case "browser_open_shortcut": actionType = "open_shortcut"; break;
             case "browser_switch_tab": actionType = "switch_tab"; break;
             case "browser_get_session_info": actionType = "get_session_info"; break;
             case "browser_list_sessions": actionType = "list_sessions"; break;
@@ -2173,6 +2219,8 @@ const fallbackRoutes = [
     
     { path: '/mcp/tools/browser_list_shortcuts', type: 'list_shortcuts' },
     { path: '/tools/browser_list_shortcuts', type: 'list_shortcuts' },
+    { path: '/mcp/tools/browser_open_shortcut', type: 'open_shortcut' },
+    { path: '/tools/browser_open_shortcut', type: 'open_shortcut' },
 
     { path: '/mcp/tools/browser_get_html', type: 'get_html' },
     { path: '/tools/browser_get_html', type: 'get_html' },
@@ -3849,6 +3897,99 @@ app.post('/admin/accounts/plan', async (req, res) => {
 
     console.log(`[Admin] ${updated.email} planı: ${plan}`);
     res.redirect(303, '/?ok=' + encodeURIComponent(`${updated.email} → ${plan}`));
+});
+
+// --- operator-managed recommended sites ---
+
+function quickLinkRedirect(message, error = false) {
+    return '/admin/quick-links?' + (error ? 'err=' : 'ok=') + encodeURIComponent(message);
+}
+
+function quickLinkInput(body, id) {
+    const category = String(body.category || '').trim().replace(/\s+/g, ' ').substring(0, 60);
+    const name = String(body.name || '').trim().replace(/\s+/g, ' ').substring(0, 80);
+    const description = String(body.description || '').trim().replace(/\s+/g, ' ').substring(0, 240);
+    const rawUrl = String(body.url || '').trim();
+    if (!category || !name || !rawUrl) throw new Error('Kategori, site adı ve bağlantı zorunludur.');
+    if (rawUrl.length > 2048) throw new Error('Bağlantı en fazla 2048 karakter olabilir.');
+
+    let parsed;
+    try { parsed = new URL(rawUrl); } catch (e) { throw new Error('Geçerli bir HTTPS bağlantısı girin.'); }
+    if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) {
+        throw new Error('Yalnızca kullanıcı adı veya parola içermeyen HTTPS bağlantıları kabul edilir.');
+    }
+
+    const order = (value, label) => {
+        const n = Number.parseInt(String(value ?? ''), 10);
+        if (!Number.isInteger(n) || n < 0 || n > 9999) throw new Error(`${label} 0–9999 arasında olmalıdır.`);
+        return n;
+    };
+
+    return {
+        id,
+        category,
+        categoryOrder: order(body.categoryOrder, 'Kategori sırası'),
+        name,
+        url: parsed.toString(),
+        description,
+        sortOrder: order(body.sortOrder, 'Site sırası'),
+        active: String(body.active) === '1'
+    };
+}
+
+app.get('/admin/quick-links', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    const csrf = ensureCsrfCookie(req, res, ctx.csrf);
+    const catalogue = await store.listQuickLinks({ includeInactive: true });
+    panelHeaders(res);
+    res.send(panel.renderQuickLinks({
+        account: ctx.account,
+        catalogue,
+        csrf,
+        error: req.query.err ? String(req.query.err).substring(0, 200) : '',
+        notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
+    }));
+});
+
+app.post('/admin/quick-links/save', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, quickLinkRedirect('Form doğrulaması başarısız.', true));
+
+    const suppliedId = String((req.body && req.body.id) || '').trim();
+    if (suppliedId && !/^[a-zA-Z0-9_-]{1,80}$/.test(suppliedId)) {
+        return res.redirect(303, quickLinkRedirect('Geçersiz kısayol kimliği.', true));
+    }
+    if (suppliedId && !(await store.getQuickLink(suppliedId))) {
+        return res.redirect(303, quickLinkRedirect('Düzenlenecek site artık mevcut değil.', true));
+    }
+
+    try {
+        const id = suppliedId || `shortcut_${randomUUID()}`;
+        const input = quickLinkInput(req.body || {}, id);
+        await store.upsertQuickLink(input);
+        await broadcastQuickLinkCatalogue();
+        console.log(`[Admin] Hızlı link kaydedildi: ${input.category} / ${input.name}`);
+        res.redirect(303, quickLinkRedirect(`${input.name} kaydedildi.`));
+    } catch (e) {
+        res.redirect(303, quickLinkRedirect(e.message || 'Site kaydedilemedi.', true));
+    }
+});
+
+app.post('/admin/quick-links/delete', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, quickLinkRedirect('Form doğrulaması başarısız.', true));
+
+    const id = String((req.body && req.body.id) || '').trim();
+    const existing = id && await store.getQuickLink(id);
+    if (!existing || !(await store.deleteQuickLink(id))) {
+        return res.redirect(303, quickLinkRedirect('Silinecek site bulunamadı.', true));
+    }
+    await broadcastQuickLinkCatalogue();
+    console.log(`[Admin] Hızlı link silindi: ${existing.category} / ${existing.name}`);
+    res.redirect(303, quickLinkRedirect(`${existing.name} silindi.`));
 });
 
 app.post('/devices/claim', async (req, res) => {
