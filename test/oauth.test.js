@@ -482,7 +482,7 @@ test('Claude callback yeni GET gezinmesiyle açılır ve aynı geçiş kurtarıl
 
     const html = await first.text();
     assert.match(html, /Kod kabul edildi/);
-    assert.match(html, /Claude'a dön/);
+    assert.match(html, /Claude&#39;a dön/);
     assert.match(html, /window\.location\.replace\(target\)/);
     assert.match(html, /http-equiv="refresh"/);
 
@@ -512,7 +512,7 @@ test('Claude callback yeni GET gezinmesiyle açılır ve aynı geçiş kurtarıl
     device.close();
 });
 
-test('ChatGPT callback kendi beklediği 302 ile döner ve aynı geçiş kurtarılabilir', async () => {
+test('ChatGPT callback bağımsız gezinme belgesiyle açılır ve aynı geçiş kurtarılabilir', async () => {
     const secret = 'istemci-sirri-chatgpt-gecis-1';
     const device = await connectDevice('dev_chatgpt_gecis', 'cihaz-sirri-16-karakter', [
         { clientId: 'cli_chatgpt_gecis', secret, name: 'ChatGPT geçiş' }
@@ -533,17 +533,21 @@ test('ChatGPT callback kendi beklediği 302 ile döner ve aynı geçiş kurtarı
     };
 
     const first = await submitAuthorize(fields);
-    assert.equal(first.status, 302, 'ChatGPT callback geleneksel OAuth 302 yanıtını bekliyor');
-    const location = first.headers.get('location') || '';
-    const callbackUrl = new URL(location);
+    assert.equal(first.status, 200, 'ChatGPT form POST sonucunda bağımsız gezinme belgesi almalı');
+    const refresh = first.headers.get('refresh') || '';
+    assert.match(refresh, /^0; url=https:\/\/chatgpt\.com\/connector_platform_oauth_redirect\?/);
+    const callbackUrl = new URL(refresh.replace(/^0; url=/, ''));
     assert.equal(callbackUrl.origin + callbackUrl.pathname, redirectUri);
     assert.equal(callbackUrl.searchParams.get('state'), 'chatgpt-durum');
     const authCode = callbackUrl.searchParams.get('code');
     assert.ok(authCode);
+    const html = await first.text();
+    assert.match(html, /ChatGPT&#39;ye dönülüyor/);
+    assert.match(html, /window\.location\.replace\(target\)/);
 
     const repeated = await submitAuthorize(fields);
-    assert.equal(repeated.status, 302);
-    assert.equal(repeated.headers.get('location'), location);
+    assert.equal(repeated.status, 200);
+    assert.equal(repeated.headers.get('refresh'), refresh);
 
     const token = await exchange({
         grant_type: 'authorization_code',

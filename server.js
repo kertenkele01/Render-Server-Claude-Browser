@@ -2464,18 +2464,17 @@ function samePendingAuthorization(pending, parsed) {
 }
 
 function sendAuthorizationCallback(res, callbackUrl) {
-    // ChatGPT's hosted broker expects the conventional OAuth 302 it used
-    // before the Claude POST-method workaround. Keep that path separate: the
-    // two hosted callbacks do not process a form submission in the same way.
-    if (isChatGptCallback(callbackUrl)) return res.redirect(302, callbackUrl);
-    if (!isClaudeCallback(callbackUrl)) return res.redirect(303, callbackUrl);
+    const hostedClient = isClaudeCallback(callbackUrl)
+        ? "Claude'a"
+        : (isChatGptCallback(callbackUrl) ? "ChatGPT'ye" : '');
+    if (!hostedClient) return res.redirect(303, callbackUrl);
 
-    // A fresh document navigation avoids Claude's hosted connector carrying the
-    // form POST method into its GET-only callback. Refresh, meta refresh,
-    // top-level JavaScript navigation and a visible link cover the different
-    // embedded-browser behaviours seen in Claude web and desktop.
+    // A fresh document navigation keeps hosted connector callback behaviour
+    // out of the form POST. Refresh, meta refresh, top-level JavaScript
+    // navigation and a visible link cover the different embedded browsers used
+    // by Claude and ChatGPT without changing the OAuth grant itself.
     res.setHeader('Refresh', `0; url=${callbackUrl}`);
-    return res.status(200).send(oauth.renderOAuthRedirectPage(callbackUrl));
+    return res.status(200).send(oauth.renderOAuthRedirectPage(callbackUrl, hostedClient));
 }
 
 app.get('/oauth/authorize', async (req, res) => {
@@ -2659,6 +2658,15 @@ app.post('/oauth/token', async (req, res) => {
     }
 
     try { await store.touchOAuthClient(grant.oauthClientId, Date.now()); } catch (e) { /* not worth failing a login over */ }
+
+    addLog(
+        grant.clientId,
+        record.name,
+        record.deviceId,
+        'OAuth Token Teslimi',
+        'success',
+        'OAuth istemcisi erişim anahtarını PKCE doğrulamasından sonra aldı.'
+    );
 
     // The token *is* the credential. There is nothing else it could be without
     // the relay storing a second secret at rest, which is the thing this design
