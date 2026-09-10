@@ -830,8 +830,7 @@ test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async 
 
     const updatePromise = device.next('quick_links_updated');
     const saved = await form(operator, '/admin/quick-links/save', {
-        category: 'Uçuş',
-        categoryOrder: '50',
+        categoryId: 'category-flight',
         name: 'Test Bilet',
         sortOrder: '1',
         url: 'https://tickets.example/search?affiliate=bridge&campaign=ai',
@@ -847,10 +846,23 @@ test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async 
     assert.equal(site.url, 'https://tickets.example/search?affiliate=bridge&campaign=ai');
     assert.match(site.shortcutId, /^shortcut_/);
 
+    device.send({ type: 'shortcut_opened', shortcutId: site.shortcutId });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     const refreshed = await visit(operator, '/admin/quick-links');
     const html = await refreshed.text();
     assert.match(html, /Test Bilet/);
     assert.match(html, /affiliate=bridge&amp;campaign=ai/);
+    assert.match(html, /1 açılış/);
+    assert.match(html, /Kategori yönetimi/);
+    assert.match(html, /name="categoryId"/);
+
+    const categorySaved = await form(operator, '/admin/quick-links/categories/save', {
+        title: 'Fırsatlar', sortOrder: '70'
+    });
+    assert.equal(categorySaved.status, 303);
+    const withCategory = await visit(operator, '/admin/quick-links');
+    assert.match(await withCategory.text(), /Fırsatlar/);
 
     device.close();
 });

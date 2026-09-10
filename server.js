@@ -1514,6 +1514,17 @@ wss.on('connection', (ws, request) => {
             return;
         }
 
+        // Count only a shortcut the authenticated phone says it actually
+        // accepted and opened. The event contains the stable catalogue id —
+        // never the destination URL or its affiliate query parameters.
+        if (payload.type === 'shortcut_opened') {
+            const shortcutId = String(payload.shortcutId || '').trim();
+            if (/^[a-zA-Z0-9_-]{1,80}$/.test(shortcutId)) {
+                await store.recordQuickLinkOpen(shortcutId, Date.now());
+            }
+            return;
+        }
+
         // The device minted a credential locally and is telling us the hash so
         // it works immediately, without waiting for the next register.
         if (payload.type === 'client_added') {
@@ -3905,8 +3916,7 @@ function quickLinkRedirect(message, error = false) {
     return '/admin/quick-links?' + (error ? 'err=' : 'ok=') + encodeURIComponent(message);
 }
 
-function quickLinkInput(body, id) {
-    const category = String(body.category || '').trim().replace(/\s+/g, ' ').substring(0, 60);
+function quickLinkInput(body, id, category) {
     const name = String(body.name || '').trim().replace(/\s+/g, ' ').substring(0, 80);
     const description = String(body.description || '').trim().replace(/\s+/g, ' ').substring(0, 240);
     const rawUrl = String(body.url || '').trim();
@@ -3927,8 +3937,9 @@ function quickLinkInput(body, id) {
 
     return {
         id,
-        category,
-        categoryOrder: order(body.categoryOrder, 'Kategori sırası'),
+        categoryId: category.id,
+        category: category.title,
+        categoryOrder: category.sortOrder,
         name,
         url: parsed.toString(),
         description,
@@ -3937,15 +3948,29 @@ function quickLinkInput(body, id) {
     };
 }
 
+function quickLinkCategoryInput(body, id) {
+    const title = String(body.title || '').trim().replace(/\s+/g, ' ').substring(0, 60);
+    const sortOrder = Number.parseInt(String(body.sortOrder ?? ''), 10);
+    if (!title) throw new Error('Kategori adı zorunludur.');
+    if (!Number.isInteger(sortOrder) || sortOrder < 0 || sortOrder > 9999) {
+        throw new Error('Kategori sırası 0–9999 arasında olmalıdır.');
+    }
+    return { id, title, sortOrder };
+}
+
 app.get('/admin/quick-links', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
     const csrf = ensureCsrfCookie(req, res, ctx.csrf);
-    const catalogue = await store.listQuickLinks({ includeInactive: true });
+    const [catalogue, categories] = await Promise.all([
+        store.listQuickLinks({ includeInactive: true }),
+        store.listQuickLinkCategories()
+    ]);
     panelHeaders(res);
     res.send(panel.renderQuickLinks({
         account: ctx.account,
         catalogue,
+        categories,
         csrf,
         error: req.query.err ? String(req.query.err).substring(0, 200) : '',
         notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
@@ -3966,8 +3991,11 @@ app.post('/admin/quick-links/save', async (req, res) => {
     }
 
     try {
+        const categoryId = String((req.body && req.body.categoryId) || '').trim();
+        const category = categoryId && await store.getQuickLinkCategory(categoryId);
+        if (!category) throw new Error('Seçilen kategori bulunamadı. Önce kategoriyi oluşturun.');
         const id = suppliedId || `shortcut_${randomUUID()}`;
-        const input = quickLinkInput(req.body || {}, id);
+        const input = quickLinkInput(req.body || {}, id, category);
         await store.upsertQuickLink(input);
         await broadcastQuickLinkCatalogue();
         console.log(`[Admin] Hızlı link kaydedildi: ${input.category} / ${input.name}`);
@@ -3975,6 +4003,45 @@ app.post('/admin/quick-links/save', async (req, res) => {
     } catch (e) {
         res.redirect(303, quickLinkRedirect(e.message || 'Site kaydedilemedi.', true));
     }
+});
+
+app.post('/admin/quick-links/categories/save', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, quickLinkRedirect('Form doğrulaması başarısız.', true));
+
+    const suppliedId = String((req.body && req.body.id) || '').trim();
+    if (suppliedId && !/^[a-zA-Z0-9_-]{1,80}$/.test(suppliedId)) {
+        return res.redirect(303, quickLinkRedirect('Geçersiz kategori kimliği.', true));
+    }
+    if (suppliedId && !(await store.getQuickLinkCategory(suppliedId))) {
+        return res.redirect(303, quickLinkRedirect('Düzenlenecek kategori artık mevcut değil.', true));
+    }
+
+    try {
+        const id = suppliedId || `category_${randomUUID()}`;
+        const input = quickLinkCategoryInput(req.body || {}, id);
+        await store.upsertQuickLinkCategory(input);
+        await broadcastQuickLinkCatalogue();
+        res.redirect(303, quickLinkRedirect(`${input.title} kategorisi kaydedildi.`));
+    } catch (e) {
+        res.redirect(303, quickLinkRedirect(e.message || 'Kategori kaydedilemedi.', true));
+    }
+});
+
+app.post('/admin/quick-links/categories/delete', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    if (!csrfOk(req, ctx)) return res.redirect(303, quickLinkRedirect('Form doğrulaması başarısız.', true));
+
+    const id = String((req.body && req.body.id) || '').trim();
+    const existing = id && await store.getQuickLinkCategory(id);
+    if (!existing) return res.redirect(303, quickLinkRedirect('Silinecek kategori bulunamadı.', true));
+    if (!(await store.deleteQuickLinkCategory(id))) {
+        return res.redirect(303, quickLinkRedirect('İçinde site bulunan kategori silinemez. Önce siteleri taşıyın veya silin.', true));
+    }
+    await broadcastQuickLinkCatalogue();
+    res.redirect(303, quickLinkRedirect(`${existing.title} kategorisi silindi.`));
 });
 
 app.post('/admin/quick-links/delete', async (req, res) => {
