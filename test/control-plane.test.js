@@ -823,6 +823,8 @@ test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async 
     const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
     const device = await connectDevice('dev_catalogue', 'cihaz-sirri-catalogue-16');
     assert.ok(device.ack.catalog.categories.length > 0, 'kayıt yanıtında katalog yok');
+    const seededSites = device.ack.catalog.categories.flatMap((category) => category.sites);
+    assert.ok(seededSites.every((site) => site.description), 'varsayılan sitelerin AI açıklaması eksik');
 
     const page = await visit(operator, '/admin/quick-links');
     assert.equal(page.status, 200);
@@ -844,6 +846,7 @@ test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async 
         .find((item) => item.name === 'Test Bilet');
     assert.ok(site, 'yeni site canlı katalogda yok');
     assert.equal(site.url, 'https://tickets.example/search?affiliate=bridge&campaign=ai');
+    assert.equal(site.description, 'AI bilet araması için');
     assert.match(site.shortcutId, /^shortcut_/);
 
     device.send({ type: 'shortcut_opened', shortcutId: site.shortcutId });

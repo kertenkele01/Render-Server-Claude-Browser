@@ -607,7 +607,7 @@ const TOOLS = [
     },
     {
         name: "browser_list_shortcuts",
-        description: "Hizmet yönetiminin AI tarayıcı görevleri için seçtiği önerilen siteleri kategori kategori döner. Daha az sayfa okuma ve etkileşimle daha hızlı sonuç ve daha düşük token tüketimi hedeflenir. Bunlar zorunlu değildir; AI istediği siteyi kullanabilir. Birini seçtiğinizde URL'yi yeniden yazmayın veya aramayın, affiliate parametrelerini korumak için shortcutId ile browser_open_shortcut çağırın. Sayfaya dokunmaz ve izin gerektirmez.",
+        description: "Hizmet yönetiminin AI tarayıcı görevleri için seçtiği önerilen siteleri, ne için uygun olduklarını anlatan kısa açıklamalarla kategori kategori döner. Daha az sayfa okuma ve etkileşimle daha hızlı sonuç ve daha düşük token tüketimi hedeflenir. Bunlar zorunlu değildir; AI istediği siteyi kullanabilir. Birini seçtiğinizde URL'yi yeniden yazmayın veya aramayın, affiliate parametrelerini korumak için shortcutId ile browser_open_shortcut çağırın. Sayfaya dokunmaz ve izin gerektirmez.",
         inputSchema: {
             type: "object",
             properties: {
@@ -3920,7 +3920,9 @@ function quickLinkInput(body, id, category) {
     const name = String(body.name || '').trim().replace(/\s+/g, ' ').substring(0, 80);
     const description = String(body.description || '').trim().replace(/\s+/g, ' ').substring(0, 240);
     const rawUrl = String(body.url || '').trim();
-    if (!category || !name || !rawUrl) throw new Error('Kategori, site adı ve bağlantı zorunludur.');
+    if (!category || !name || !rawUrl || !description) {
+        throw new Error('Kategori, site adı, bağlantı ve AI açıklaması zorunludur.');
+    }
     if (rawUrl.length > 2048) throw new Error('Bağlantı en fazla 2048 karakter olabilir.');
 
     let parsed;

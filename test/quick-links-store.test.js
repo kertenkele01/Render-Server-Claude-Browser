@@ -14,6 +14,8 @@ test('operator quick links persist affiliate URLs and catalogue revision', async
         store = await openStore({ stateFile, databaseUrl: '' });
         const initial = await store.listQuickLinks({ includeInactive: true });
         assert.ok(initial.links.length > 0, 'default catalogue was not seeded');
+        assert.ok(initial.links.every((link) => link.description),
+            'default links should include short AI descriptions');
         const categories = await store.listQuickLinkCategories();
         const flight = categories.find((category) => category.title === 'Uçuş');
         assert.ok(flight, 'default category was not seeded');
