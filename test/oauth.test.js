@@ -133,8 +133,8 @@ async function registerOAuthClient(redirectUris = ['http://127.0.0.1:9876/callba
 }
 
 /** Asks the phone to offer a pairing code and waits for the relay's answer. */
-async function pairingCodeFor(device, clientId, secret) {
-    device.send({ type: 'oauth_pairing_request', clientId, clientSecret: secret });
+async function pairingCodeFor(device, clientId, secret, locale) {
+    device.send({ type: 'oauth_pairing_request', clientId, clientSecret: secret, ...(locale ? { locale } : {}) });
     return device.next('oauth_pairing_code');
 }
 
@@ -311,6 +311,35 @@ test('doğrulanamayan OAuth isteği kod formu göstermez', () => {
     assert.match(html, /client_id eksik/);
     assert.doesNotMatch(html, /<form\b/i);
     assert.doesNotMatch(html, /name="code"/i);
+});
+
+test('OAuth kullanıcı sayfaları İngilizce gösterilebilir', () => {
+    const html = oauth.renderAuthorizePage({
+        clientName: 'ChatGPT',
+        hidden: {
+            client_id: 'client', redirect_uri: 'https://example.com/callback',
+            code_challenge: 'challenge', response_type: 'code', lang: 'en'
+        },
+        language: 'en'
+    });
+    assert.match(html, /<html lang="en">/);
+    assert.match(html, /Approve connection/);
+    assert.match(html, /Connection code from your phone/);
+    assert.match(html, /lang="tr"/);
+    assert.doesNotMatch(html, /Bağlantıyı onayla/);
+
+    const redirect = oauth.renderOAuthRedirectPage(
+        'https://chatgpt.com/connector_platform_oauth_redirect?code=one', 'ChatGPT', 'en'
+    );
+    assert.match(redirect, /Code accepted/);
+    assert.match(redirect, /Returning to ChatGPT/);
+});
+
+test('OAuth dili güvenli destek listesi ve tarayıcı tercihiyle seçilir', () => {
+    assert.equal(oauth.normaliseLanguage('en-US'), 'en');
+    assert.equal(oauth.normaliseLanguage('de-DE'), 'tr');
+    assert.equal(oauth.languageFromAcceptLanguage('de-DE,de;q=0.9,en-US;q=0.8'), 'en');
+    assert.equal(oauth.languageFromAcceptLanguage('tr-TR,tr;q=0.9'), 'tr');
 });
 
 // --- registration ----------------------------------------------------------
@@ -520,7 +549,7 @@ test('ChatGPT callback bağımsız gezinme belgesiyle açılır ve aynı geçiş
     const redirectUri = 'https://chatgpt.com/connector_platform_oauth_redirect';
     const registered = await registerOAuthClient([redirectUri]);
     const pkce = newPkce();
-    const offer = await pairingCodeFor(device, 'cli_chatgpt_gecis', secret);
+    const offer = await pairingCodeFor(device, 'cli_chatgpt_gecis', secret, 'en');
     const fields = {
         response_type: 'code',
         client_id: registered.body.client_id,
@@ -542,7 +571,8 @@ test('ChatGPT callback bağımsız gezinme belgesiyle açılır ve aynı geçiş
     const authCode = callbackUrl.searchParams.get('code');
     assert.ok(authCode);
     const html = await first.text();
-    assert.match(html, /ChatGPT&#39;ye dönülüyor/);
+    assert.match(html, /Code accepted/);
+    assert.match(html, /Returning to ChatGPT/);
     assert.match(html, /window\.location\.replace\(target\)/);
 
     const repeated = await submitAuthorize(fields);

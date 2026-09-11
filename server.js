@@ -1595,6 +1595,7 @@ wss.on('connection', (ws, request) => {
         if (payload.type === 'oauth_pairing_request') {
             const cid = String(payload.clientId || '').trim();
             const secret = String(payload.clientSecret || '');
+            const locale = payload.locale == null ? null : oauth.normaliseLanguage(payload.locale);
             const record = clients.get(cid);
 
             // Verified against the registry, not taken on trust: a device may
@@ -1605,7 +1606,9 @@ wss.on('connection', (ws, request) => {
                     type: 'oauth_pairing_code',
                     status: 'rejected',
                     clientId: cid,
-                    reason: 'Bu istemci bu cihaza ait değil ya da anahtar eşleşmiyor.'
+                    reason: locale === 'en'
+                        ? 'This client does not belong to this device or the key does not match.'
+                        : 'Bu istemci bu cihaza ait değil ya da anahtar eşleşmiyor.'
                 }));
                 return;
             }
@@ -1631,7 +1634,8 @@ wss.on('connection', (ws, request) => {
                 secret,
                 deviceId,
                 accountId: record.accountId || null,
-                clientName: record.name || 'AI istemcisi'
+                clientName: record.name || 'AI istemcisi',
+                locale
             });
 
             addLog(cid, record.name, deviceId, 'OAuth Kodu', 'info', 'Cihaz bir bağlantı kodu üretti.');
@@ -2469,7 +2473,15 @@ function redirectWithError(res, redirectUri, state, error, description, issuer) 
     return res.redirect(302, url.toString());
 }
 
-function authorizeHidden(parsed) {
+function oauthRequestLanguage(req) {
+    const explicit = (req.body && req.body.lang) || (req.query && req.query.lang);
+    return oauth.normaliseLanguage(
+        explicit,
+        oauth.languageFromAcceptLanguage(req.get('accept-language'))
+    );
+}
+
+function authorizeHidden(parsed, language) {
     return {
         client_id: parsed.clientId,
         redirect_uri: parsed.redirectUri,
@@ -2477,7 +2489,8 @@ function authorizeHidden(parsed) {
         code_challenge: parsed.challenge,
         code_challenge_method: 'S256',
         response_type: 'code',
-        resource: parsed.resource
+        resource: parsed.resource,
+        lang: oauth.normaliseLanguage(language)
     };
 }
 
@@ -2522,10 +2535,11 @@ function samePendingAuthorization(pending, parsed) {
         pending.resource === parsed.resource;
 }
 
-function sendAuthorizationCallback(res, callbackUrl) {
+function sendAuthorizationCallback(res, callbackUrl, language = 'tr') {
+    const lang = oauth.normaliseLanguage(language);
     const hostedClient = isClaudeCallback(callbackUrl)
-        ? "Claude'a"
-        : (isChatGptCallback(callbackUrl) ? "ChatGPT'ye" : '');
+        ? (lang === 'en' ? 'Claude' : "Claude'a")
+        : (isChatGptCallback(callbackUrl) ? (lang === 'en' ? 'ChatGPT' : "ChatGPT'ye") : '');
     if (!hostedClient) return res.redirect(303, callbackUrl);
 
     // A fresh document navigation keeps hosted connector callback behaviour
@@ -2533,31 +2547,36 @@ function sendAuthorizationCallback(res, callbackUrl) {
     // navigation and a visible link cover the different embedded browsers used
     // by Claude and ChatGPT without changing the OAuth grant itself.
     res.setHeader('Refresh', `0; url=${callbackUrl}`);
-    return res.status(200).send(oauth.renderOAuthRedirectPage(callbackUrl, hostedClient));
+    return res.status(200).send(oauth.renderOAuthRedirectPage(callbackUrl, hostedClient, lang));
 }
 
 app.get('/oauth/authorize', async (req, res) => {
     oauthAuthorizeHeaders(res);
+    const language = oauthRequestLanguage(req);
     const parsed = await readAuthorizeRequest(req.query || {}, oauth.originOf(req));
     if (parsed.fail) {
         return res.status(400).send(oauth.renderAuthorizePage({
             clientName: 'Bilinmeyen istemci',
             hidden: {},
-            error: parsed.fail
+            error: parsed.fail,
+            language
         }));
     }
     if (parsed.redirect) {
-        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description, parsed.issuer);
+        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error,
+            oauth.localizeOAuthMessage(parsed.redirect.description, language), parsed.issuer);
     }
 
     return res.send(oauth.renderAuthorizePage({
         clientName: parsed.record.name,
-        hidden: authorizeHidden(parsed)
+        hidden: authorizeHidden(parsed, language),
+        language
     }));
 });
 
 app.post('/oauth/authorize', async (req, res) => {
     oauthAuthorizeHeaders(res);
+    const language = oauthRequestLanguage(req);
     // Claude's hosted connector browser can submit only the visible code field
     // and omit hidden inputs. The form action carries the same OAuth context in
     // its query string, so merge both sources with the submitted body winning.
@@ -2569,11 +2588,13 @@ app.post('/oauth/authorize', async (req, res) => {
         return res.status(400).send(oauth.renderAuthorizePage({
             clientName: 'Bilinmeyen istemci',
             hidden: {},
-            error: parsed.fail
+            error: parsed.fail,
+            language
         }));
     }
     if (parsed.redirect) {
-        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error, parsed.redirect.description, parsed.issuer);
+        return redirectWithError(res, parsed.redirectUri, parsed.state, parsed.redirect.error,
+            oauth.localizeOAuthMessage(parsed.redirect.description, language), parsed.issuer);
     }
 
     const ip = limits.clientIp(req);
@@ -2582,8 +2603,9 @@ app.post('/oauth/authorize', async (req, res) => {
         res.setHeader('Retry-After', String(gate.retryAfterSeconds));
         return res.status(429).send(oauth.renderAuthorizePage({
             clientName: parsed.record.name,
-            hidden: authorizeHidden(parsed),
-            error: `Çok fazla hatalı kod denendi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`
+            hidden: authorizeHidden(parsed, language),
+            error: `Çok fazla hatalı kod denendi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`,
+            language
         }));
     }
 
@@ -2591,14 +2613,15 @@ app.post('/oauth/authorize', async (req, res) => {
     if (!oauth.isWellFormedCode(code)) {
         return res.status(400).send(oauth.renderAuthorizePage({
             clientName: parsed.record.name,
-            hidden: authorizeHidden(parsed),
-            error: 'Kod 8 karakter olmalı. Telefondaki kodu olduğu gibi yazın; büyük/küçük harf ve tire fark etmez.'
+            hidden: authorizeHidden(parsed, language),
+            error: 'Kod 8 karakter olmalı. Telefondaki kodu olduğu gibi yazın; büyük/küçük harf ve tire fark etmez.',
+            language
         }));
     }
 
     const pending = isHostedCallback(parsed.redirectUri) ? oauthPendingCallbacks.peek(code) : null;
     if (samePendingAuthorization(pending, parsed)) {
-        return sendAuthorizationCallback(res, pending.callbackUrl);
+        return sendAuthorizationCallback(res, pending.callbackUrl, pending.language || language);
     }
 
     // Single-use: `take` removes it whether or not the rest succeeds, so a code
@@ -2607,10 +2630,15 @@ app.post('/oauth/authorize', async (req, res) => {
     if (!pairing) {
         return res.status(400).send(oauth.renderAuthorizePage({
             clientName: parsed.record.name,
-            hidden: authorizeHidden(parsed),
-            error: 'Kod geçersiz ya da süresi dolmuş. Telefondan yeni bir kod alın — kodlar 5 dakika geçerlidir ve bir kez kullanılır.'
+            hidden: authorizeHidden(parsed, language),
+            error: 'Kod geçersiz ya da süresi dolmuş. Telefondan yeni bir kod alın — kodlar 5 dakika geçerlidir ve bir kez kullanılır.',
+            language
         }));
     }
+
+    // The pairing code carries the phone's app-language preference. It is
+    // presentation metadata only and never participates in authorization.
+    const successLanguage = oauth.normaliseLanguage(pairing.locale, language);
 
     // The client may have been revoked between the phone offering the code and
     // the user typing it.
@@ -2618,8 +2646,9 @@ app.post('/oauth/authorize', async (req, res) => {
     if (!stillValid || !safeEquals(sha256(pairing.secret), stillValid.secretHash)) {
         return res.status(400).send(oauth.renderAuthorizePage({
             clientName: parsed.record.name,
-            hidden: authorizeHidden(parsed),
-            error: 'Bu kodun bağlı olduğu erişim anahtarı artık geçerli değil. Telefondan yeni bir kod alın.'
+            hidden: authorizeHidden(parsed, successLanguage),
+            error: 'Bu kodun bağlı olduğu erişim anahtarı artık geçerli değil. Telefondan yeni bir kod alın.',
+            language: successLanguage
         }));
     }
 
@@ -2657,10 +2686,11 @@ app.post('/oauth/authorize', async (req, res) => {
             codeChallenge: parsed.challenge,
             state: parsed.state,
             resource: parsed.resource,
-            callbackUrl
+            callbackUrl,
+            language: successLanguage
         });
     }
-    return sendAuthorizationCallback(res, callbackUrl);
+    return sendAuthorizationCallback(res, callbackUrl, successLanguage);
 });
 
 // --- token -----------------------------------------------------------------
