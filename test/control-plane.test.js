@@ -29,6 +29,7 @@ const OPERATOR_EMAIL = 'operator@test.com';
 
 let child;
 let stateFile;
+let operatorDevice;
 
 // --- helpers ---------------------------------------------------------------
 
@@ -78,15 +79,9 @@ async function form(jar, url, fields) {
     });
 }
 
-/** Registers on the web and signs in. Only the operator needs this path. */
+/** Signs in to the admin-only web panel. */
 async function webSignIn(email, password) {
     const jar = newJar();
-    await visit(jar, '/register');
-    const created = await form(jar, '/auth/register', { email, password });
-    // Helpers may reuse the same operator later in this file. A duplicate
-    // registration is deliberately a generic 400; the following real login is
-    // what proves the supplied account is usable.
-    assert.ok([303, 400].includes(created.status), 'web kaydı başarısız');
     await visit(jar, '/login');
     const logged = await form(jar, '/auth/login', { email, password });
     assert.equal(logged.status, 303, 'web girişi başarısız');
@@ -225,9 +220,13 @@ test.before(async () => {
         });
         child.on('exit', (code) => reject(new Error(`sunucu ${code} ile çıktı`)));
     });
+
+    operatorDevice = await connectDevice('dev_operator_panel', 'operator-device-secret-16');
+    await appSignUp(operatorDevice, OPERATOR_EMAIL, 'operator-parolasi-uzun');
 });
 
 test.after(() => {
+    if (operatorDevice) operatorDevice.close();
     if (child) child.kill();
     try { fs.unlinkSync(stateFile); } catch (e) {}
 });
@@ -916,22 +915,21 @@ test('panel oturum ister', async () => {
 });
 
 test('operatör olmayan hesap panelde yönetim göremez', async () => {
-    const jar = await webSignIn('sadecekullanici@test.com', 'kullanici-parolasi-uzun');
-
-    const page = await visit(jar, '/');
-    assert.equal(page.status, 200);
-    const html = await page.text();
-    assert.match(html, /Her şey uygulamada/);
-    assert.ok(!html.includes('Röle geneli'), 'operatör olmayan hesaba toplamlar gösterildi');
-
-    const api = await visit(jar, '/api/status');
-    assert.equal(api.status, 403);
-    assert.equal((await api.json()).error, 'not_operator');
+    const device = await connectDevice('dev_panel_normal_user', 'panel-normal-device-secret');
+    await appSignUp(device, 'sadecekullanici@test.com', 'kullanici-parolasi-uzun');
+    const jar = newJar();
+    await visit(jar, '/login');
+    const login = await form(jar, '/auth/login', {
+        email: 'sadecekullanici@test.com', password: 'kullanici-parolasi-uzun'
+    });
+    assert.equal(login.status, 401);
+    assert.match(await login.text(), /yalnızca yetkilendirilmiş yönetici/);
+    assert.equal(jar.get('bridge_session'), undefined, 'normal kullanıcıya panel oturumu verildi');
+    assert.equal((await visit(jar, '/')).headers.get('location'), '/login');
+    device.close();
 });
 
 test('operatör toplamları ve hesap listesini görür', async () => {
-    const jar = await webSignIn(OPERATOR_EMAIL + '.x', 'olmayan-operator-parolasi');
-    // The above is a normal account; the real operator signs in separately.
     const operator = newJar();
     await visit(operator, '/login');
     const logged = await form(operator, '/auth/login', {
@@ -940,8 +938,12 @@ test('operatör toplamları ve hesap listesini görür', async () => {
     assert.equal(logged.status, 303);
 
     const html = await (await visit(operator, '/')).text();
-    assert.match(html, /Röle geneli/);
-    assert.match(html, /Hesaplar/);
+    assert.match(html, /Genel Bakış/);
+    assert.match(html, /Kullanıcıları Yönet/);
+
+    const users = await visit(operator, '/admin/users');
+    assert.equal(users.status, 200);
+    assert.match(await users.text(), /Kullanıcılar/);
 
     const status = await (await visit(operator, '/api/status')).json();
     assert.ok(status.totals.accounts >= 2);
@@ -949,7 +951,56 @@ test('operatör toplamları ve hesap listesini görür', async () => {
     assert.ok(status.accounts.every((a) => !('passwordHash' in a)), 'hesap listesi parola özeti sızdırdı');
     assert.ok(!JSON.stringify(status).includes('gizli/yol'), 'operatör görünümüne denetim ayrıntısı sızdı');
 
-    assert.equal(jar instanceof Object, true);
+    assert.equal(operator instanceof Object, true);
+});
+
+test('web panelinde hesap kaydı yoktur', async () => {
+    const jar = newJar();
+    const page = await visit(jar, '/register');
+    assert.equal(page.status, 303);
+    assert.equal(page.headers.get('location'), '/login');
+    const post = await visit(jar, '/auth/register', { method: 'POST' });
+    assert.equal(post.status, 404);
+});
+
+test('yönetici kullanıcı ayrıntısını yönetir ve güvenli parola sıfırlar', async () => {
+    const oldPassword = 'yonetilen-kullanici-eski';
+    const newPassword = 'yonetilen-kullanici-yeni';
+    const device = await connectDevice('dev_admin_managed_user', 'admin-managed-device-secret');
+    await appSignUp(device, 'yonetilen@test.com', oldPassword);
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const status = await (await visit(operator, '/api/status')).json();
+    const target = status.accounts.find((row) => row.email === 'yonetilen@test.com');
+    assert.ok(target);
+
+    const filtered = await visit(operator, '/admin/users?q=yonetilen%40test.com&plan=free&status=active');
+    assert.equal(filtered.status, 200);
+    const filteredHtml = await filtered.text();
+    assert.match(filteredHtml, /yonetilen@test\.com/);
+    assert.ok(!filteredHtml.includes('passwordHash'));
+
+    const detail = await visit(operator, `/admin/users/${target.id}`);
+    assert.equal(detail.status, 200);
+    const detailHtml = await detail.text();
+    assert.match(detailHtml, /Kullanıcı Parolasını Sıfırla/);
+    assert.match(detailHtml, /Plan Yönetimi/);
+
+    const reset = await form(operator, `/admin/users/${target.id}/password`, {
+        next: newPassword,
+        confirm: newPassword,
+        operatorPassword: 'operator-parolasi-uzun'
+    });
+    assert.equal(reset.status, 303);
+    assert.match(reset.headers.get('location'), /ok=/);
+
+    await appApi(device, 'POST', '/api/v1/logout');
+    assert.equal((await appApi(device, 'POST', '/api/v1/login', {
+        email: 'yonetilen@test.com', password: oldPassword
+    })).status, 401);
+    assert.equal((await appApi(device, 'POST', '/api/v1/login', {
+        email: 'yonetilen@test.com', password: newPassword
+    })).status, 200);
+    device.close();
 });
 
 test('CSRF alanı olmadan panel girişi kabul edilmez', async () => {

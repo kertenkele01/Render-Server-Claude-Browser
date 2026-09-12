@@ -41,8 +41,8 @@ try {
 // accounts, that is no longer a convenience, it is a way to hand one tenant
 // everybody else's browsing. The panel is behind a real session now.
 //
-// ALLOW_REGISTRATION closes signups on a private deployment. Open by default so
-// a fresh install is usable; the first account is the operator's own.
+// ALLOW_REGISTRATION controls signups from the Android app. The web surface is
+// admin-only and never exposes account registration.
 const ALLOW_REGISTRATION = !/^(0|false|no|off)$/i.test((process.env.ALLOW_REGISTRATION || 'true').trim());
 
 // Operator accounts, by email. Named in the environment rather than granted
@@ -2501,6 +2501,7 @@ function oauthAuthorizeHeaders(res) {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
 }
 
 function isClaudeCallback(value) {
@@ -3705,66 +3706,22 @@ function ensureCsrfCookie(req, res, existing) {
 
 // --- auth pages ---
 
-app.get(['/login', '/register'], async (req, res) => {
+app.get('/login', async (req, res) => {
     const ctx = await currentSession(req);
     if (ctx) return res.redirect(303, '/');
     const cookies = accounts.parseCookies(req);
     const csrf = ensureCsrfCookie(req, res, cookies[accounts.CSRF_COOKIE]);
-    const mode = req.path === '/register' ? 'register' : 'login';
-    if (mode === 'register' && !ALLOW_REGISTRATION) {
-        panelHeaders(res);
-        return res.send(panel.renderLogin({
-            mode: 'login', csrf,
-            error: 'Bu röle yeni kayıtlara kapalı.'
-        }));
-    }
     panelHeaders(res);
-    res.send(panel.renderLogin({ mode, csrf, notice: req.query.ok ? 'Hesabınız oluşturuldu, giriş yapabilirsiniz.' : '' }));
+    const queryError = req.query.reason === 'admin_only'
+        ? 'Bu yönetim paneline yalnızca yetkilendirilmiş yönetici hesapları giriş yapabilir.'
+        : '';
+    res.send(panel.renderLogin({ csrf, error: queryError }));
 });
 
-app.post('/auth/register', async (req, res) => {
-    const cookies = accounts.parseCookies(req);
-    const csrf = ensureCsrfCookie(req, res, cookies[accounts.CSRF_COOKIE]);
-    const fail = (message, email) => {
-        panelHeaders(res);
-        res.status(400).send(panel.renderLogin({ mode: 'register', csrf, error: message, email }));
-    };
-
-    if (!ALLOW_REGISTRATION) return fail('Bu röle yeni kayıtlara kapalı.');
-    if (!accounts.safeEquals(String((req.body && req.body._csrf) || ''), csrf)) {
-        return fail('Form doğrulaması başarısız. Sayfayı yenileyip tekrar deneyin.');
-    }
-
-    const gate = limits.hit('register', limits.clientIp(req));
-    if (!gate.allowed) {
-        res.setHeader('Retry-After', String(gate.retryAfterSeconds));
-        return fail('Çok fazla kayıt denemesi. Bir süre sonra tekrar deneyin.');
-    }
-
-    const email = accounts.normaliseEmail(req.body && req.body.email);
-    const password = String((req.body && req.body.password) || '');
-
-    const emailIssue = accounts.emailProblem(email);
-    if (emailIssue) return fail(emailIssue, email);
-    const passwordIssue = accounts.passwordProblem(password);
-    if (passwordIssue) return fail(passwordIssue, email);
-
-    const existing = await store.getAccountByEmail(email);
-    if (existing) {
-        // Same wording as a bad password on login, for the same reason: this
-        // form must not become a way to test which addresses have accounts.
-        return fail('Bu e-posta ile kayıt oluşturulamadı.', email);
-    }
-
-    const { passwordHash, passwordSalt } = await accounts.hashPassword(password);
-    const account = await store.createAccount({ email, passwordHash, passwordSalt });
-    if (ADMIN_EMAILS.includes(email)) {
-        await store.setAccountAdmin(account.id, true);
-        console.log(`[Auth] Yönetici hesabı: ${email}`);
-    }
-    console.log(`[Auth] Yeni hesap: ${account.id}`);
-    res.redirect(303, '/login?ok=1');
-});
+// Account creation belongs to the Android app. Keeping registration out of the
+// web panel makes the public surface unambiguous: this site is an admin console.
+app.get('/register', (req, res) => res.redirect(303, '/login'));
+app.post('/auth/register', (req, res) => res.status(404).send('Not found'));
 
 app.post('/auth/login', async (req, res) => {
     const cookies = accounts.parseCookies(req);
@@ -3803,6 +3760,9 @@ app.post('/auth/login', async (req, res) => {
     if (account.status !== 'active') {
         return fail('Bu hesap askıya alınmış.');
     }
+    if (!account.isAdmin) {
+        return fail('Bu yönetim paneline yalnızca yetkilendirilmiş yönetici hesapları giriş yapabilir.');
+    }
 
     limits.reset('login', `e:${email}`);
     limits.reset('login', `i:${ip}`);
@@ -3840,9 +3800,9 @@ async function requireOperator(req, res) {
     const ctx = await requirePanelSession(req, res);
     if (!ctx) return null;
     if (!ctx.account.isAdmin) {
-        const csrf = ensureCsrfCookie(req, res, ctx.csrf);
-        panelHeaders(res);
-        res.status(200).send(panel.renderNotOperator({ email: ctx.account.email, csrf }));
+        await store.revokeWebSession(ctx.session.idHash);
+        accounts.clearAuthCookies(req, res);
+        res.redirect(303, '/login?reason=admin_only');
         return null;
     }
     return ctx;
@@ -3851,33 +3811,118 @@ async function requireOperator(req, res) {
 app.get('/', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
-    const csrf = ensureCsrfCookie(req, res, ctx.csrf);
     const window = limits.currentUsageWindow();
 
-    const [totals, accountRows, ownDevices, ownClients] = await Promise.all([
+    const [totals, accountRows, catalogue, categories] = await Promise.all([
         store.aggregates(window),
-        store.listAccounts({ limit: 300 }),
-        store.listDevices(ctx.account.id),
-        store.listClients(ctx.account.id)
+        store.listAccounts({ limit: 1000 }),
+        store.listQuickLinks({ includeInactive: true }),
+        store.listQuickLinkCategories()
     ]);
-    const usageByAccount = await store.usageForAccounts(accountRows.map((a) => a.id), window);
+    const recentAccounts = accountRows.slice(0, 6);
+    const usageByAccount = await store.usageForAccounts(recentAccounts.map((a) => a.id), window);
+    const breakdown = accountRows.reduce((out, row) => {
+        if (row.status === 'active') out.active++;
+        else out.suspended++;
+        if (row.plan === 'pro') out.pro++;
+        else out.free++;
+        return out;
+    }, { active: 0, suspended: 0, pro: 0, free: 0 });
 
     panelHeaders(res);
     res.send(panel.renderOperatorOverview({
         account: ctx.account,
         totals,
-        accountRows,
+        breakdown,
+        recentAccounts,
         usageByAccount,
-        ownDevices,
-        ownClients,
-        connectedDeviceIds: [...browsers.keys()],
         openChannels: sseSessions.size,
-        csrf,
+        quickLinks: {
+            sites: catalogue.links.length,
+            categories: categories.length,
+            opens: catalogue.links.reduce((sum, link) => sum + Number(link.openCount || 0), 0),
+            revision: catalogue.revision
+        },
         registrationOpen: ALLOW_REGISTRATION,
         error: req.query.err ? String(req.query.err).substring(0, 200) : '',
         notice: req.query.ok ? String(req.query.ok).substring(0, 200) : '',
         storeWarning: store.durable ? '' :
             'Bu röle kalıcı bir veritabanı olmadan çalışıyor (DATABASE_URL tanımlı değil). Hesaplar ve cihaz bağları bir sonraki dağıtımda kaybolabilir.'
+    }));
+});
+
+function userPageRedirect(accountId, message, error = false) {
+    return `/admin/users/${encodeURIComponent(accountId)}?${error ? 'err' : 'ok'}=${encodeURIComponent(message)}`;
+}
+
+app.get('/admin/users', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    const csrf = ensureCsrfCookie(req, res, ctx.csrf);
+    const filters = {
+        q: String(req.query.q || '').trim().substring(0, 120),
+        status: ['active', 'suspended'].includes(String(req.query.status || '')) ? String(req.query.status) : '',
+        plan: Object.prototype.hasOwnProperty.call(limits.PLANS, String(req.query.plan || '')) ? String(req.query.plan) : ''
+    };
+    const rows = await store.listAccounts({
+        limit: 1000,
+        query: filters.q,
+        status: filters.status,
+        plan: filters.plan
+    });
+    const usageByAccount = await store.usageForAccounts(rows.map((row) => row.id), limits.currentUsageWindow());
+    panelHeaders(res);
+    res.send(panel.renderUsers({
+        account: ctx.account,
+        accounts: rows,
+        usageByAccount,
+        filters,
+        csrf,
+        error: req.query.err ? String(req.query.err).substring(0, 200) : '',
+        notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
+    }));
+});
+
+app.get('/admin/users/:accountId', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    const accountId = String(req.params.accountId || '').trim();
+    const target = await store.getAccountById(accountId);
+    if (!target) {
+        panelHeaders(res);
+        return res.status(404).send(panel.renderMessage({
+            title: 'Kullanıcı bulunamadı · MCP Bridge',
+            heading: 'Kullanıcı bulunamadı',
+            text: 'Bu hesap silinmiş veya kimliği değişmiş olabilir.',
+            linkHref: '/admin/users',
+            linkText: 'Kullanıcı listesine dön'
+        }));
+    }
+    const [deviceCount, clientCount, activeSessions, usageByAccount] = await Promise.all([
+        store.countDevices(accountId),
+        store.countClients(accountId),
+        store.countActiveWebSessions(accountId),
+        store.usageForAccounts([accountId], limits.currentUsageWindow())
+    ]);
+    const publicTarget = {
+        id: target.id,
+        email: target.email,
+        createdAt: target.createdAt,
+        status: target.status,
+        plan: target.plan,
+        isAdmin: target.isAdmin,
+        deviceCount,
+        clientCount
+    };
+    panelHeaders(res);
+    res.send(panel.renderUserDetail({
+        account: ctx.account,
+        target: publicTarget,
+        usage: usageByAccount.get(accountId) || 0,
+        activeSessions,
+        csrf: ensureCsrfCookie(req, res, ctx.csrf),
+        error: req.query.err ? String(req.query.err).substring(0, 200) : '',
+        notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
     }));
 });
 
@@ -3892,19 +3937,23 @@ app.get('/', async (req, res) => {
 app.post('/admin/accounts/status', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
-    if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
-
     const accountId = String((req.body && req.body.accountId) || '').trim();
+    if (!csrfOk(req, ctx)) return res.redirect(303, userPageRedirect(accountId, 'Form doğrulaması başarısız.', true));
     const status = String((req.body && req.body.status) || '').trim();
     if (!['active', 'suspended'].includes(status)) {
-        return res.redirect(303, '/?err=' + encodeURIComponent('Geçersiz durum.'));
+        return res.redirect(303, userPageRedirect(accountId, 'Geçersiz durum.', true));
     }
     if (accountId === ctx.account.id && status === 'suspended') {
-        return res.redirect(303, '/?err=' + encodeURIComponent('Kendi hesabınızı askıya alamazsınız.'));
+        return res.redirect(303, userPageRedirect(accountId, 'Kendi hesabınızı askıya alamazsınız.', true));
     }
 
+    const target = await store.getAccountById(accountId);
+    if (!target) return res.redirect(303, '/admin/users?err=' + encodeURIComponent('Hesap bulunamadı.'));
+    if (target.isAdmin && target.id !== ctx.account.id) {
+        return res.redirect(303, userPageRedirect(accountId, 'Başka bir yönetici hesabının durumu panelden değiştirilemez.', true));
+    }
     const updated = await store.setAccountStatus(accountId, status);
-    if (!updated) return res.redirect(303, '/?err=' + encodeURIComponent('Hesap bulunamadı.'));
+    if (!updated) return res.redirect(303, '/admin/users?err=' + encodeURIComponent('Hesap bulunamadı.'));
     await refreshRegistryCache();
 
     if (status === 'suspended') {
@@ -3918,26 +3967,86 @@ app.post('/admin/accounts/status', async (req, res) => {
     }
 
     console.log(`[Admin] ${updated.email} durumu: ${status}`);
-    res.redirect(303, '/?ok=' + encodeURIComponent(`${updated.email} → ${status}`));
+    res.redirect(303, userPageRedirect(accountId, `Hesap durumu ${status === 'active' ? 'aktif' : 'askıda'} olarak güncellendi.`));
 });
 
 app.post('/admin/accounts/plan', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
-    if (!csrfOk(req, ctx)) return res.redirect(303, '/?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
-
     const accountId = String((req.body && req.body.accountId) || '').trim();
+    if (!csrfOk(req, ctx)) return res.redirect(303, userPageRedirect(accountId, 'Form doğrulaması başarısız.', true));
     const plan = String((req.body && req.body.plan) || '').trim();
     if (!Object.prototype.hasOwnProperty.call(limits.PLANS, plan)) {
-        return res.redirect(303, '/?err=' + encodeURIComponent('Geçersiz plan.'));
+        return res.redirect(303, userPageRedirect(accountId, 'Geçersiz plan.', true));
     }
 
     const updated = await store.setAccountPlan(accountId, plan);
-    if (!updated) return res.redirect(303, '/?err=' + encodeURIComponent('Hesap bulunamadı.'));
+    if (!updated) return res.redirect(303, '/admin/users?err=' + encodeURIComponent('Hesap bulunamadı.'));
     await refreshRegistryCache();
 
     console.log(`[Admin] ${updated.email} planı: ${plan}`);
-    res.redirect(303, '/?ok=' + encodeURIComponent(`${updated.email} → ${plan}`));
+    res.redirect(303, userPageRedirect(accountId, `Plan ${plan.toUpperCase()} olarak güncellendi.`));
+});
+
+app.post('/admin/users/:accountId/password', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    const accountId = String(req.params.accountId || '').trim();
+    const fail = (message) => res.redirect(303, userPageRedirect(accountId, message, true));
+    if (!csrfOk(req, ctx)) return fail('Form doğrulaması başarısız.');
+    if (accountId === ctx.account.id) return fail('Kendi parolanızı Yönetici Hesabı bölümünden değiştirin.');
+
+    const target = await store.getAccountById(accountId);
+    if (!target) return res.redirect(303, '/admin/users?err=' + encodeURIComponent('Hesap bulunamadı.'));
+    if (target.isAdmin) return fail('Başka bir yönetici hesabının parolası panelden sıfırlanamaz.');
+
+    const gateKey = `admin-password:${ctx.account.id}:${limits.clientIp(req)}`;
+    const gate = limits.hit('login', gateKey);
+    if (!gate.allowed) {
+        res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+        return fail(`Çok fazla doğrulama denemesi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`);
+    }
+    const operatorPassword = String((req.body && req.body.operatorPassword) || '');
+    if (!await accounts.verifyPassword(operatorPassword, ctx.account.passwordHash, ctx.account.passwordSalt)) {
+        return fail('Yönetici parolanız hatalı.');
+    }
+    limits.reset('login', gateKey);
+
+    const next = String((req.body && req.body.next) || '');
+    const confirm = String((req.body && req.body.confirm) || '');
+    if (next !== confirm) return fail('Yeni parola alanları eşleşmiyor.');
+    const issue = accounts.passwordProblem(next);
+    if (issue) return fail(issue);
+
+    const { passwordHash, passwordSalt } = await accounts.hashPassword(next);
+    const changed = await store.changePasswordWithCookieKey(
+        target.id,
+        target.passwordHash,
+        passwordHash,
+        passwordSalt,
+        null,
+        target.cookieKeyRevision || 0
+    );
+    if (!changed) {
+        return fail('Bu hesapta şifreli yedek veya paylaşılan anahtar var. Veri anahtarını korumak için kullanıcı parolasını Android uygulamasından değiştirmelidir.');
+    }
+    const revoked = await store.revokeAccountSessions(target.id);
+    console.log(`[Admin] ${target.email} parolası sıfırlandı; ${revoked} panel oturumu kapatıldı.`);
+    res.redirect(303, userPageRedirect(accountId, `Parola sıfırlandı ve ${revoked} açık panel oturumu kapatıldı.`));
+});
+
+app.post('/admin/users/:accountId/sessions/revoke', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    const accountId = String(req.params.accountId || '').trim();
+    const fail = (message) => res.redirect(303, userPageRedirect(accountId, message, true));
+    if (!csrfOk(req, ctx)) return fail('Form doğrulaması başarısız.');
+    if (accountId === ctx.account.id) return fail('Kendi oturumlarınızı Yönetici Hesabı bölümünden yönetin.');
+    const target = await store.getAccountById(accountId);
+    if (!target) return res.redirect(303, '/admin/users?err=' + encodeURIComponent('Hesap bulunamadı.'));
+    if (target.isAdmin) return fail('Başka bir yönetici hesabının oturumları panelden kapatılamaz.');
+    const revoked = await store.revokeAccountSessions(accountId);
+    res.redirect(303, userPageRedirect(accountId, `${revoked} panel oturumu kapatıldı.`));
 });
 
 // --- operator-managed recommended sites ---
@@ -4245,12 +4354,20 @@ app.get('/account', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
     const csrf = ensureCsrfCookie(req, res, ctx.csrf);
+    const [activeSessions, ownDevices, ownClients] = await Promise.all([
+        store.countActiveWebSessions(ctx.account.id),
+        store.listDevices(ctx.account.id),
+        store.listClients(ctx.account.id)
+    ]);
     panelHeaders(res);
     res.send(panel.renderAccount({
         account: ctx.account,
         plan: limits.planFor(ctx.account),
         csrf,
-        activeSessions: '—',
+        activeSessions,
+        ownDevices,
+        ownClients,
+        connectedDeviceIds: [...browsers.keys()],
         error: req.query.err ? String(req.query.err).substring(0, 200) : '',
         notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
     }));
