@@ -39,14 +39,23 @@ Bu uçlar hesap oturumuyla değil, telefonun zaten elinde olan
 oturum çerezini hiç saklamaz, ve **bağlama örtüktür**: giriş yapan cihaz,
 bağlanan cihazdır.
 
-### Panel operatörler için
+### Panel yalnızca operatörler için
 
-`ADMIN_EMAILS` içinde adı geçen hesaplar `/` adresinde şunları görür: röle
-toplamları (hesap, cihaz, istemci, açık kanal, bugünkü komut, sahipsiz cihaz),
-hesap listesi ve hesap başına askıya alma / plan değiştirme.
+`ADMIN_EMAILS` içinde adı geçen hesaplar `/` adresindeki yönetim merkezine
+giriş yapabilir. Yönetici hesabını oluşturmak için e-postayı önce ortam
+değişkenine ekleyin, sonra aynı adresle Android uygulamasından kaydolun. Web
+panelinde kayıt formu yoktur ve normal kullanıcı kimlik bilgileri kabul edilmez.
 
-Normal bir hesap panele düşerse "her şey uygulamada" sayfasını görür — hata
-değil, yönlendirme.
+Panel; genel sistem özeti, filtrelenebilir kullanıcı listesi, kullanıcı ayrıntı
+ekranları, yönetici hesabı ve mevcut hızlı link kataloğunu ayrı bölümlerde
+gösterir. Bir yönetici kullanıcı planını Free/Pro olarak değiştirebilir, hesabı
+askıya alabilir ve panel oturumlarını kapatabilir.
+
+Kullanıcı parolası sıfırlama işlemi yöneticinin kendi parolasını tekrar
+doğrulamasını ister. Hesapta uçtan uca şifreli çerez veya AI anahtar paketi
+varsa veri anahtarını kaybetmemek için sıfırlama reddedilir; kullanıcı parolayı
+Android uygulamasından değiştirmelidir. Başka yöneticilerin durumu, parolası ve
+oturumları panelden değiştirilemez.
 
 **Operatör başka bir hesabın denetim kaydını göremez.** Kullanıcı yönetmek için
 sayaç ve durum yeterli; hangi siteleri gezdikleri operatörün işi değil.
@@ -59,8 +68,8 @@ Tek operatörlük `ADMIN_TOKEN` konsolu kaldırıldı. Tek bir paylaşılan toke
 rölendeki her cihazı ve her telefonun ziyaret ettiği host'ları listeliyordu.
 
 Panel tamamen sunucuda render edilir ve **hiç JavaScript içermez**; sayfalar
-`script-src 'none'` ile gelir, çünkü ekranda gösterilen hesap ve cihaz adlarını
-başkaları yazmıştır.
+`script-src 'none'`, CSRF koruması ve `Cache-Control: no-store` ile gelir,
+çünkü ekranda gösterilen hesap ve cihaz adlarını başkaları yazmıştır.
 
 ### Cihaz bağlama
 
