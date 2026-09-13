@@ -36,9 +36,8 @@ services:
       - key: ALLOW_REGISTRATION
         sync: false
 
-      # Comma-separated operator addresses. An account whose email is listed
-      # here gets the console at "/"; everyone else is a normal user whose whole
-      # experience is the app. Set this before creating your own account.
+      # Reserved operator addresses; public signup refuses these emails.
+      # Provision from a trusted shell with scripts/provision-operator.cjs.
       - key: ADMIN_EMAILS
         sync: false
 
@@ -47,6 +46,13 @@ services:
       # deliberately front the bridge with a web app.
       - key: ALLOWED_ORIGINS
         value: ""
+
+      # Optional custom HTTPS origin; Render's external URL is used by default.
+      # - key: PUBLIC_ORIGIN
+      #   value: "https://bridge.example.com"
+      # Only actual proxy IPs/CIDRs may supply forwarded headers.
+      # - key: TRUSTED_PROXIES
+      #   sync: false
 
       # Rate-limit ceilings. Defaults live in lib/limits.js; override one only
       # with a reason — a shared office behind a single NAT address is the usual

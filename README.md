@@ -41,10 +41,13 @@ bağlanan cihazdır.
 
 ### Panel yalnızca operatörler için
 
-`ADMIN_EMAILS` içinde adı geçen hesaplar `/` adresindeki yönetim merkezine
-giriş yapabilir. Yönetici hesabını oluşturmak için e-postayı önce ortam
-değişkenine ekleyin, sonra aynı adresle Android uygulamasından kaydolun. Web
-panelinde kayıt formu yoktur ve normal kullanıcı kimlik bilgileri kabul edilmez.
+Operatör hesapları `/` adresindeki yönetim merkezine giriş yapabilir. E-postayı
+önce `ADMIN_EMAILS` ortam değişkenine ekleyin, sonra güvenilir sunucu terminalinden
+`node scripts/provision-operator.cjs <email>` çalıştırın; parola gizli sorulur.
+Dosya deposunda röleyi önce durdurun ve sonra yeniden başlatın. Var olan hesabı
+yükseltmek için sahipliğini doğruladıktan sonra `--promote-existing` ekleyin;
+bu adım mevcut parolayı değiştirmez. Halka açık kayıt yönetici adreslerini
+reddeder ve hiçbir hesaba yönetici yetkisi vermez. Web panelinde kayıt formu yoktur.
 
 Panel; genel sistem özeti, filtrelenebilir kullanıcı listesi, kullanıcı ayrıntı
 ekranları, yönetici hesabı ve mevcut hızlı link kataloğunu ayrı bölümlerde
@@ -147,8 +150,8 @@ telefon biliyor.
 2. `render.yaml` bir web servisi ve bir PostgreSQL veritabanı tanımlar;
    `DATABASE_URL` otomatik bağlanır.
 3. Environment sekmesinden `ADMIN_EMAILS` değerine kendi e-postanı yaz.
-4. `/` adresine gidip o e-postayla hesabı oluştur — konsolu yalnızca o hesap
-   görür.
+4. Güvenilir sunucu terminalinden `node scripts/provision-operator.cjs <email>`
+   ile operatör hesabını oluştur, sonra `/` adresinde giriş yap.
 5. Kayıtları kapatmak istersen `ALLOW_REGISTRATION=false` yap.
 6. Kullanıcılar panele hiç uğramaz: uygulamayı kurar, **Ayarlar → MCP → Hesap**
    bölümünden kaydolur ve cihazları kendiliğinden bağlanır.
@@ -161,6 +164,21 @@ başkasına düşer ve köprü sessizce bozulur. Kayıt defteri artık Postgres'
 soketler paylaşılamaz — `numInstances: 1` olarak bırak.
 
 ## Yerel çalıştırma
+
+TLS proxy'de sonlanıyorsa `PUBLIC_ORIGIN` dışarıdan kullanılan HTTPS kök adresi
+olmalı. Hız sınırları için `TRUSTED_PROXIES` içine yalnızca gerçek proxy IP/ağlarını
+yazın; varsayılan hiçbir proxy'ye güvenmez.
+Render'da özel adres belirtilmezse platformun `RENDER_EXTERNAL_URL` değeri
+kullanılır; istek başlıkları bu adresi değiştiremez.
+
+Android ve röleyi birlikte güncelleyin. HTML `offset` ve `next_offset` ile
+bölümlenir; cevaplar kodlanmış UTF-8 bayt bütçesine göre sınırlandırılır ve
+büyük görseller küçültülür. Cihaz en fazla 60 saniye çalışır; röle varsayılan
+90 saniye bekler ve süre aşımında cihazın doğrulayacağı iptal gönderir.
+İptal gerçekleşmiş bir etkiyi geri alamaz. Yan etkili çağrıdan önce sabit
+`operationId` seçin; aynı anahtar, araç, hedef ve parametrelerle tekrar çağrı
+beş dakika içinde ikinci işlem başlatmaz. Kayıt bellektedir ve yeniden başlatmada
+kaybolur; belirsiz sonuçta önce sayfanın durumunu kontrol edin.
 
 ```bash
 npm install

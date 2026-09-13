@@ -8,13 +8,14 @@ const path = require('path');
 
 const { openStore } = require('./lib/store');
 const accounts = require('./lib/auth');
-const limits = require('./lib/limits');
 const panel = require('./lib/panel');
 const oauth = require('./lib/oauth');
 const { cataloguePayload } = require('./lib/quick-links');
+const { protectAsyncRoutes, errorResponse } = require('./lib/http-safety');
 
 const app = express();
 app.disable('x-powered-by');
+protectAsyncRoutes(app);
 // Tool-call payloads are small; the device streams large results back over the
 // WebSocket, never through this body parser.
 app.use(express.json({ limit: '1mb' }));
@@ -34,6 +35,11 @@ try {
 } catch (e) {
     console.warn('[Config] Could not read .env:', e.message);
 }
+const limits = require('./lib/limits');
+require('./lib/network').publicOrigin(); // Reject invalid public origin at boot.
+app.set('trust proxy', limits.trustProxy);
+const { argumentsProblem, operationCache } = require('./lib/command-safety');
+const operations = operationCache();
 
 // ADMIN_TOKEN and ADMIN_PUBLIC are gone. They were a stand-in for "there is
 // one operator and it is me": a single shared token that unlocked a console
@@ -45,10 +51,8 @@ try {
 // admin-only and never exposes account registration.
 const ALLOW_REGISTRATION = !/^(0|false|no|off)$/i.test((process.env.ALLOW_REGISTRATION || 'true').trim());
 
-// Operator accounts, by email. Named in the environment rather than granted
-// through a UI so that promoting yourself is not something a signup can do.
-// Matching accounts get the console; everyone else is a normal user whose whole
-// experience lives in the Android app.
+// Reserved operator addresses. Public signup never grants operator authority.
+// Operators are provisioned by scripts/provision-operator.cjs on the server.
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
     .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 // MCP clients are not browsers, so no cross-origin access is required. Set
@@ -75,7 +79,10 @@ function positiveEnv(name, fallback) {
     const value = Number.parseInt(process.env[name] || '', 10);
     return Number.isFinite(value) && value > 0 ? value : fallback;
 }
-const MAX_WS_PAYLOAD_BYTES = positiveEnv('MAX_WS_PAYLOAD_BYTES', 1024 * 1024);
+const MAX_WS_PAYLOAD_BYTES = Math.max(4096, positiveEnv('MAX_WS_PAYLOAD_BYTES', 1024 * 1024));
+const MAX_DEVICE_RESPONSE_BYTES = Math.min(MAX_WS_PAYLOAD_BYTES, 1024 * 1024);
+const COMMAND_TIMEOUT_MS = Math.max(1000, positiveEnv('COMMAND_TIMEOUT_MS', 90000));
+const DEVICE_COMMAND_TIMEOUT_MS = Math.min(60000, Math.floor(COMMAND_TIMEOUT_MS * 2 / 3));
 const MAX_UNAUTH_WS_GLOBAL = positiveEnv('MAX_UNAUTH_WS_GLOBAL', 64);
 const MAX_UNAUTH_WS_PER_IP = positiveEnv('MAX_UNAUTH_WS_PER_IP', 8);
 const MAX_SSE_CHANNELS_GLOBAL = positiveEnv('MAX_SSE_CHANNELS_GLOBAL', 500);
@@ -363,10 +370,11 @@ const TOOLS = [
     },
     {
         name: "browser_get_html",
-        description: "Şu an açık olan sayfanın saf HTML kaynağını (`html`), sayfa URL'sini ve sayfa başlığını alır.",
+        description: "Açık sayfanın HTML kaynağını, URL'sini ve başlığını alır. Büyük kaynaklar bölümlenir; has_more varsa next_offset ile devam edin.",
         inputSchema: {
             type: "object",
             properties: {
+                offset: { type: 'integer', minimum: 0, description: 'HTML bölümünün başlangıç karakteri; devam için next_offset kullanın.' },
                 deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
             }
         }
@@ -666,10 +674,17 @@ const TOOLS = [
 ];
 
 // Comprehensive Tool Documentation & Agent Playbooks Dictionary
+for (const tool of TOOLS) {
+    tool.inputSchema.properties.operationId = {
+        type: 'string', pattern: '^[A-Za-z0-9_-]{8,80}$',
+        description: 'Yan etkili işlemlerde çağrıdan önce seçilen sabit işlem kimliği. Aynı anahtar ve parametrelerle 5 dakika içinde tekrar gönderim ikinci işlem başlatmaz. Röle yeniden başlarsa bu bellek kaydı kaybolur; belirsiz sonuçlarda önce sayfanın durumunu kontrol edin.'
+    };
+}
 const TOOL_DOCUMENTATION = {
     overview: {
         title: "Android Tarayıcı MCP Köprüsü - AI Ajanı Kullanım Rehberi (Agent Playbook & Skills)",
         description: "Bu sistem, gerçek bir Android cihazı üzerindeki donanım hızlandırmalı WebView ile çalışan yüksek performanslı Model Context Protocol (MCP) köprüsüdür. Yapay zeka ajanları gerçek tarayıcı ortamında arama yapabilir, sayfaları okuyabilir, form doldurabilir, butonlara tıklayabilir, sekme ve izole oturum yönetimi gerçekleştirebilir.",
+        operation_safety: "Yan etkili çağrıdan önce sabit operationId seçin; aynı anahtar, araç, hedef ve parametrelerle 5 dakika içinde tekrar çağrı ikinci işlem başlatmaz. Bu kayıt bellektedir ve röle yeniden başlayınca kaybolur. command_outcome_unknown durumunda önce sayfayı kontrol edin; gerçekleşmiş bir etki iptalle geri alınamaz.",
         capabilities: [
             "Gerçek Android WebView ortamında tam JavaScript, DOM, CSS ve Canvas çalıştırma",
             "Multi-Profile Cookie İzolasyonu: Her AI istemcisine özel bağımsız çerez ve depolama alanı",
@@ -772,11 +787,12 @@ const TOOL_DOCUMENTATION = {
         browser_get_html: {
             name: "browser_get_html",
             category: "content_extraction",
-            summary: "Sayfanın ham outerHTML kaynağını döner.",
+            summary: "Sayfanın ham outerHTML kaynağını mesaj sınırına uygun bölümler halinde döner.",
             parameters: {
+                offset: "(Opsiyonel, Integer) İlk çağrıda 0; devam için önceki next_offset değeri.",
                 deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
             },
-            best_practice: "Spesifik DOM elementlerini, form input id/name etiketlerini veya karmaşık CSS seçicilerini bulmak gerektiğinde kullanın."
+            best_practice: "Spesifik DOM elementlerini, form input id/name etiketlerini veya karmaşık CSS seçicilerini bulmak gerektiğinde kullanın. has_more true ise next_offset ile devam edin."
         },
         browser_screenshot: {
             name: "browser_screenshot",
@@ -1302,6 +1318,19 @@ function selectBoundDevice(record, requestedDeviceId = null) {
 }
 
 function routeCommandToBrowser(type, args, clientId, clientSecret, requestedDeviceId = null) {
+    const problem = argumentsProblem(args);
+    if (problem) return Promise.reject(new Error(`invalid_arguments: ${problem}`));
+    const { operationId, ...parameters } = args;
+    if (operationId) {
+        // Hash parameters so the cache does not retain typed text or selectors.
+        const fingerprint = sha256(JSON.stringify({ type, parameters, requestedDeviceId }));
+        return operations.run(`${clientId}|${sha256(clientSecret)}|${operationId}`, fingerprint,
+            () => dispatchCommandToBrowser(type, parameters, clientId, clientSecret, requestedDeviceId, operationId));
+    }
+    return dispatchCommandToBrowser(type, parameters, clientId, clientSecret, requestedDeviceId);
+}
+
+function dispatchCommandToBrowser(type, args, clientId, clientSecret, requestedDeviceId, operationId = null) {
     return new Promise((resolve, reject) => {
         const record = clients.get(clientId);
         if (!record) return reject(new Error('İstemci kaydı bulunamadı. Lütfen cihazdan yeniden eşleştirin.'));
@@ -1317,28 +1346,41 @@ function routeCommandToBrowser(type, args, clientId, clientSecret, requestedDevi
 
         const messageId = randomUUID();
         const payload = JSON.stringify({
+            ...args,
             type,
             messageId,
             clientId,
             clientSecret,
-            ...args
+            timeoutMs: DEVICE_COMMAND_TIMEOUT_MS,
+            maxResponseBytes: MAX_DEVICE_RESPONSE_BYTES
         });
 
         const timeout = setTimeout(() => {
             pendingRequests.delete(messageId);
-            reject(new Error(`Cihazdan (${deviceId}) yanıt alınamadı, zaman aşımı (30s).`));
-        }, 30000);
+            if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'cancel_command', messageId, clientId, clientSecret }), () => {});
+            reject(new Error('command_outcome_unknown: cihaz yanıtı zaman aşımına uğradı. İşlem gerçekleşmiş olabilir; aynı yan etkili işlemi körlemesine tekrarlamayın. ' +
+                (operationId ? `Aynı operationId (${operationId}) ile yeniden gönderim ikinci bir işlem başlatmaz; sayfanın durumunu kontrol edin.` : 'Sayfanın durumunu kontrol edin; sonraki yan etkili işlemlerde sabit bir operationId kullanın.')));
+        }, COMMAND_TIMEOUT_MS);
 
         pendingRequests.set(messageId, {
             deviceId,
+            ws,
             resolve: (val) => {
-                if (val && typeof val === 'object' && !Array.isArray(val)) val.deviceId = deviceId;
+                if (val && typeof val === 'object' && !Array.isArray(val)) {
+                    val.deviceId = deviceId;
+                    if (operationId) val.operation_id = operationId;
+                }
                 resolve(val);
             },
             reject,
             timeout
         });
-        ws.send(payload);
+        ws.send(payload, error => {
+            if (!error || !pendingRequests.has(messageId)) return;
+            clearTimeout(timeout);
+            pendingRequests.delete(messageId);
+            reject(new Error('command_outcome_unknown: cihaz bağlantısı kesildi. Sayfanın durumunu kontrol etmeden işlemi tekrarlamayın.'));
+        });
         console.log(`[Bridge] '${type}' → client=${clientId} device=${deviceId} msg=${messageId}`);
     });
 }
@@ -1401,23 +1443,40 @@ wss.on('connection', (ws, request) => {
         try { ws.close(4401, reason); } catch (e) {}
     };
 
-    // Registration and client bookkeeping write through to the store, so this
-    // handler is async. `ws` does not wait for the returned promise, which means
-    // a second frame can start while the first is still awaiting. That is safe
-    // here only because `authenticated` is the gate: everything except
-    // `register` returns early until it is set, so an early frame is dropped
-    // rather than processed against a half-built identity. Keep that property
-    // if you add a message type.
-    ws.on('message', async (message) => {
+    // Serialize bookkeeping so frames cannot overtake registration/rotation.
+    // Bound the queue and catch every rejected promise at the socket boundary.
+    let messageQueue = Promise.resolve();
+    let queuedMessages = 0;
+    ws.on('message', message => {
+        if (++queuedMessages > 32) {
+            queuedMessages--;
+            ws.close(4429, 'Çok fazla bekleyen mesaj');
+            return;
+        }
+        messageQueue = messageQueue.then(() => {
+            if (ws.readyState === 1) return processMessage(message);
+        }).catch(() => {
+            // The error may contain a password, URL or database query.
+            console.warn('[WS] Message processing failed');
+            if (ws.readyState === 1) {
+                ws.send(JSON.stringify({ type: 'bridge_error', reason: 'İstek tamamlanamadı; yeniden bağlanın.' }), () => {});
+                ws.close(1011, 'İstek tamamlanamadı');
+            }
+        }).finally(() => { queuedMessages--; });
+    });
+
+    async function processMessage(message) {
         let payload;
         try {
             payload = JSON.parse(message.toString());
         } catch (err) {
             return; // malformed frames are ignored, never logged verbatim
         }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload) || typeof payload.type !== 'string') return;
 
         // --- registration is the only thing an unauthenticated socket may do ---
         if (payload.type === 'register') {
+            if (authenticated) return fail('Bağlantı kimliği değiştirilemez');
             const id = String(payload.deviceId || '').trim();
             const secret = String(payload.deviceSecret || '');
             if (!id || !secret || secret.length < 16) {
@@ -1461,16 +1520,13 @@ wss.on('connection', (ws, request) => {
             }
 
             deviceId = id;
-            authenticated = true;
-            clearTimeout(authDeadline);
-            releaseUnauthenticatedSlot();
-            limits.reset('websocket', connectionIp);
 
             // The device is the authority on which clients exist. Rebuild its
             // slice of the registry from what it just told us.
             if (Array.isArray(payload.clients)) {
                 const list = [];
                 payload.clients.forEach((c) => {
+                    if (!c || typeof c !== 'object' || Array.isArray(c)) return;
                     const cid = String(c.clientId || '').trim();
                     const hash = String(c.secretHash || '').trim();
                     if (cid && /^[a-f0-9]{64}$/i.test(hash)) {
@@ -1485,6 +1541,11 @@ wss.on('connection', (ws, request) => {
             }
             await store.touchDevice(id, Date.now());
             await refreshRegistryCache();
+            if (ws.readyState !== 1) return;
+            authenticated = true;
+            clearTimeout(authDeadline);
+            releaseUnauthenticatedSlot();
+            limits.reset('websocket', connectionIp);
 
             const existing = browsers.get(id);
             if (existing && existing !== ws) {
@@ -1500,12 +1561,13 @@ wss.on('connection', (ws, request) => {
                 deviceId: id,
                 status: 'success',
                 claimed: !!(record && record.accountId),
+                maxResponseBytes: MAX_DEVICE_RESPONSE_BYTES,
                 catalog: await activeQuickLinkCatalogue()
             }));
             return;
         }
 
-        if (!authenticated) return;
+        if (!authenticated || browsers.get(deviceId) !== ws) return;
 
         if (payload.type === 'ping') {
             // Note: no re-binding by deviceId here. The socket identity was
@@ -1679,7 +1741,7 @@ wss.on('connection', (ws, request) => {
         if (payload.type === 'response') {
             const pending = pendingRequests.get(payload.messageId);
             // A device may only answer requests that were routed to it.
-            if (!pending || pending.deviceId !== deviceId) return;
+            if (!pending || pending.deviceId !== deviceId || pending.ws !== ws) return;
             clearTimeout(pending.timeout);
             pendingRequests.delete(payload.messageId);
             if (payload.status === 'success' || payload.success === true) {
@@ -1689,11 +1751,17 @@ wss.on('connection', (ws, request) => {
             }
             return;
         }
-    });
+    }
 
     ws.on('close', () => {
         clearTimeout(authDeadline);
         releaseUnauthenticatedSlot();
+        for (const [messageId, pending] of pendingRequests) {
+            if (pending.ws !== ws) continue;
+            clearTimeout(pending.timeout);
+            pendingRequests.delete(messageId);
+            pending.reject(new Error('command_outcome_unknown: cihaz bağlantısı kesildi. İşlem gerçekleşmiş olabilir; sayfanın durumunu kontrol etmeden işlemi tekrarlamayın.'));
+        }
         if (deviceId && browsers.get(deviceId) === ws) {
             browsers.delete(deviceId);
             // An outstanding pairing code holds a plaintext secret and only
@@ -1877,6 +1945,11 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
     if (method === 'tools/call') {
         const toolName = params?.name;
         const args = params?.arguments || {};
+        const problem = argumentsProblem(args);
+        if (problem) {
+            reply(null, { code: -32602, message: `Invalid arguments: ${problem}` });
+            return 'handled';
+        }
 
         // `deviceId` chooses among bindings already announced by phones. It is
         // routing metadata only and is never forwarded as an authority signal.
@@ -2190,6 +2263,8 @@ const directToolHandler = async (type, req, res) => {
     if (!auth) return;
 
     const args = (req.method === 'POST' ? req.body : req.query) || {};
+    const problem = argumentsProblem(args);
+    if (problem) return res.status(400).json({ error: 'invalid_arguments', message: problem });
     const requestedDeviceId = String(args.deviceId || '').trim() || null;
     const cleanArgs = { ...args };
     delete cleanArgs.deviceId;
@@ -2290,7 +2365,7 @@ const fallbackRoutes = [
 
 fallbackRoutes.forEach(route => {
     app.all(route.path, (req, res) => {
-        directToolHandler(route.type, req, res);
+        return directToolHandler(route.type, req, res);
     });
 });
 
@@ -2947,6 +3022,9 @@ app.post('/api/v1/register', async (req, res) => {
     if (emailIssue) return res.status(400).json({ error: 'invalid_email', message: emailIssue });
     const passwordIssue = accounts.passwordProblem(password);
     if (passwordIssue) return res.status(400).json({ error: 'weak_password', message: passwordIssue });
+    if (ADMIN_EMAILS.includes(email)) {
+        return res.status(403).json({ error: 'operator_signup_reserved', message: 'Bu adres için hesabı sunucu operatörü oluşturmalıdır. Hesabınız hazırsa giriş yapın.' });
+    }
 
     if (await store.getAccountByEmail(email)) {
         return res.status(409).json({
@@ -2956,15 +3034,7 @@ app.post('/api/v1/register', async (req, res) => {
     }
 
     const { passwordHash, passwordSalt } = await accounts.hashPassword(password);
-    let account = await store.createAccount({ email, passwordHash, passwordSalt });
-
-    // The operator's own accounts are named in the environment, so the first
-    // person to sign up on a fresh relay does not have to be promoted by hand
-    // — and nobody else can promote themselves by signing up.
-    if (ADMIN_EMAILS.includes(email)) {
-        account = await store.setAccountAdmin(account.id, true) || account;
-        console.log(`[Auth] Yönetici hesabı: ${email}`);
-    }
+    const account = await store.createAccount({ email, passwordHash, passwordSalt });
 
     await linkDeviceToAccount(device, account);
     console.log(`[Auth] Yeni hesap (uygulamadan): ${account.id}`);
@@ -4447,6 +4517,7 @@ app.get('/api/status', async (req, res) => {
 });
 
 app.get('/healthz', (req, res) => res.json({ status: 'ok' }));
+app.use(errorResponse);
 
 // NOTE: The previous build exposed /oauth/authorize, /oauth/token and
 // /oauth/register. They auto-approved every request, handed out one static

@@ -194,6 +194,13 @@ function callTool(credential, args = {}) {
 
 test.before(async () => {
     stateFile = path.join(os.tmpdir(), `bridge-test-${Date.now()}.json`);
+    const { openStore } = require('../lib/store');
+    const auth = require('../lib/auth');
+    const seed = await openStore({ stateFile });
+    const hashed = await auth.hashPassword('operator-parolasi-uzun');
+    const operator = await seed.createAccount({ email: OPERATOR_EMAIL, ...hashed });
+    await seed.setAccountAdmin(operator.id, true);
+    await seed.close();
     child = spawn(process.execPath, ['server.js'], {
         cwd: ROOT,
         env: {
@@ -222,7 +229,8 @@ test.before(async () => {
     });
 
     operatorDevice = await connectDevice('dev_operator_panel', 'operator-device-secret-16');
-    await appSignUp(operatorDevice, OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const signedIn = await appApi(operatorDevice, 'POST', '/api/v1/login', { email: OPERATOR_EMAIL, password: 'operator-parolasi-uzun' });
+    assert.equal(signedIn.status, 200);
 });
 
 test.after(() => {
