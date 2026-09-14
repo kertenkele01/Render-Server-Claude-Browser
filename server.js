@@ -40,6 +40,8 @@ require('./lib/network').publicOrigin(); // Reject invalid public origin at boot
 app.set('trust proxy', limits.trustProxy);
 const { argumentsProblem, operationCache } = require('./lib/command-safety');
 const operations = operationCache();
+const management = require('./lib/device-management');
+const pendingRotations = new Map();
 
 // ADMIN_TOKEN and ADMIN_PUBLIC are gone. They were a stand-in for "there is
 // one operator and it is me": a single shared token that unlocked a console
@@ -1540,6 +1542,10 @@ wss.on('connection', (ws, request) => {
                 }
             }
             await store.touchDevice(id, Date.now());
+            if (payload.managementPublicKey !== undefined) {
+                if (!management.validPublicKey(payload.managementPublicKey) ||
+                    !await store.setDeviceManagementKey(id, payload.managementPublicKey)) return fail('Cihaz yetki anahtarı eşleşmiyor');
+            }
             await refreshRegistryCache();
             if (ws.readyState !== 1) return;
             authenticated = true;
@@ -1562,12 +1568,41 @@ wss.on('connection', (ws, request) => {
                 status: 'success',
                 claimed: !!(record && record.accountId),
                 maxResponseBytes: MAX_DEVICE_RESPONSE_BYTES,
+                backupManagementVersion: 1,
                 catalog: await activeQuickLinkCatalogue()
             }));
             return;
         }
 
         if (!authenticated || browsers.get(deviceId) !== ws) return;
+
+        if (payload.type === 'credential_rotation_response') {
+            const pending = pendingRotations.get(payload.nonce);
+            if (!pending || pending.ws !== ws || pending.originId !== deviceId) return;
+            if (payload.error) {
+                clearTimeout(pending.timeout); pendingRotations.delete(payload.nonce);
+                pending.reject(new Error('Kaynak cihaz yenilemeyi tamamlamadı. Yetki, bağlantı ve kaynak cihazdaki onayı kontrol edin.')); return;
+            }
+            const origin = devices.get(deviceId);
+            let response;
+            try { response = JSON.parse(payload.payload); } catch (_) { return; }
+            const current = clients.get(pending.clientId);
+            if (!management.validSignature(origin?.managementPublicKey, payload.payload, payload.signature) ||
+                response.nonce !== payload.nonce || response.clientId !== pending.clientId ||
+                response.accountId !== pending.accountId || response.requesterId !== pending.requesterId ||
+                response.previousHash !== pending.previousHash || current?.secretHash !== response.secretHash) return;
+            clearTimeout(pending.timeout); pendingRotations.delete(payload.nonce);
+            const requester = await store.getDevice(pending.requesterId);
+            const account = await store.getAccountById(pending.accountId);
+            const latest = clients.get(pending.clientId);
+            if (!requester || requester.accountId !== pending.accountId ||
+                latest?.accountId !== pending.accountId || latest?.secretHash !== response.secretHash ||
+                !boundDeviceIds(latest).includes(pending.requesterId) ||
+                (account?.defaultDeviceId !== pending.requesterId && !management.permissions(requester).canReadTokens)) {
+                pending.reject(new Error('Token alma yetkisi veya cihaz bağlantısı değişti. Kaynak cihazdan güncel anahtarı alın.')); return;
+            }
+            pending.resolve({payload:payload.payload, signature:payload.signature, originPublicKey:origin.managementPublicKey}); return;
+        }
 
         if (payload.type === 'ping') {
             // Note: no re-binding by deviceId here. The socket identity was
@@ -1659,6 +1694,11 @@ wss.on('connection', (ws, request) => {
             const secret = String(payload.clientSecret || '');
             const locale = payload.locale == null ? null : oauth.normaliseLanguage(payload.locale);
             const record = clients.get(cid);
+            const d = devices.get(deviceId);
+            if (d?.accountId && accountCache.get(d.accountId)?.defaultDeviceId !== deviceId && !management.permissions(d).canReadTokens) {
+                ws.send(JSON.stringify({type:'oauth_pairing_code', status:'rejected', clientId:cid,
+                    reason:'Bu cihazın token alma yetkisi kapalı. Ana cihazın ayarlarından izin verin.'})); return;
+            }
 
             // Verified against the registry, not taken on trust: a device may
             // only offer codes for clients that are its own, and only with the
@@ -1756,6 +1796,11 @@ wss.on('connection', (ws, request) => {
     ws.on('close', () => {
         clearTimeout(authDeadline);
         releaseUnauthenticatedSlot();
+        for (const [nonce, pending] of pendingRotations) {
+            if (pending.ws !== ws) continue;
+            clearTimeout(pending.timeout); pendingRotations.delete(nonce);
+            pending.reject(new Error('Kaynak cihaz bağlantısı kesildi. Token yenilenmiş olabilir; önce anahtarı yeniden almayı deneyin.'));
+        }
         for (const [messageId, pending] of pendingRequests) {
             if (pending.ws !== ws) continue;
             clearTimeout(pending.timeout);
@@ -3110,7 +3155,16 @@ app.post(['/api/v1/account/main-device', '/api/v1/account/default-device'], asyn
     if (!device) return;
     if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
     const targetId = req.body?.enabled === false ? null : String(req.body?.deviceId || device.id);
-    const changed = await store.setAccountDefaultDevice(device.accountId, targetId);
+    const account = accountCache.get(device.accountId);
+    const target = targetId ? await store.getDevice(targetId) : null;
+    if (account?.defaultDeviceId && account.defaultDeviceId !== device.id &&
+        (targetId !== device.id || !management.permissions(device).canBecomeMain)) {
+        return res.status(403).json({error:'main_selection_denied', message:'Bu cihazın ana cihaz olma yetkisi kapalı ya da başka cihazı seçmeye yetkisi yok. Ana cihazdan izin verin.'});
+    }
+    if (target && targetId !== account?.defaultDeviceId && !management.permissions(target).canBecomeMain) {
+        return res.status(403).json({error:'main_selection_denied', message:'Önce hedef cihazın ana cihaz olma yetkisini açın.'});
+    }
+    const changed = await store.setAccountDefaultDevice(device.accountId, targetId, device.id);
     if (!changed) return res.status(409).json({ error: 'main_device_failed', message: 'Ana cihaz bu hesaba ait olmalı.' });
     await refreshRegistryCache();
     addLog(null, 'Uygulama', device.id, 'Ana Cihaz Seçildi', 'success',
@@ -3120,6 +3174,97 @@ app.post(['/api/v1/account/main-device', '/api/v1/account/default-device'], asyn
         if (socket?.readyState === 1) socket.send(JSON.stringify({ type: 'main_device_changed' }));
     }
     res.json({ status: 'ok', ...(await accountSnapshot(devices.get(device.id))) });
+});
+
+app.put('/api/v1/devices/:deviceId/permissions', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device?.accountId) return device && res.status(403).json({error:'not_linked'});
+    const envelope = req.body;
+    if (!management.parsePolicy(envelope)) return res.status(400).json({error:'invalid_device_policy', message:'Cihaz yetkisi imzası geçersiz.'});
+    if (!await store.setBackupPolicy(device.accountId, device.id, req.params.deviceId, envelope)) {
+        return res.status(409).json({error:'device_policy_conflict', message:'Yetkileri yalnızca güncel ana cihaz değiştirebilir. Cihaz listesini yenileyin.'});
+    }
+    await refreshRegistryCache();
+    for (const owned of await store.listDevices(device.accountId)) {
+        const socket = browsers.get(owned.id);
+        if (socket?.readyState === 1) socket.send(JSON.stringify({type:'device_permissions_changed'}));
+    }
+    addLog(null, 'Uygulama', device.id, 'Yedek Cihaz Yetkileri', 'success', 'Kullanıcı cihaz yönetim yetkilerini değiştirdi.');
+    res.json({status:'ok'});
+});
+
+app.post('/api/v1/clients/:clientId/rotate', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device?.accountId) return device && res.status(403).json({error:'not_linked'});
+    const record = clients.get(req.params.clientId), account = accountCache.get(device.accountId);
+    if (!record || record.accountId !== device.accountId || !boundDeviceIds(record).includes(device.id)) {
+        return res.status(403).json({error:'not_bound', message:'Önce bu bağlantıyı aynı hesapta kabul edin.'});
+    }
+    if (management.parseRotation(req.body)) {
+        const request=management.parseRotation(req.body);
+        if (request.clientId!==req.params.clientId) return res.status(400).json({error:'invalid_rotation_request'});
+        let result;
+        try { result=await store.commitCredentialRotation(device.accountId,device.id,req.body); }
+        catch (_) { return res.status(503).json({error:'rotation_uncertain',message:'Yenileme sonucu belirsiz. Aynı işlemi tekrar deneyin veya güncel anahtarı alın.'}); }
+        if (result.status!=='ok') return res.status(result.status==='conflict'?409:403).json({error:result.status==='conflict'?'rotation_conflict':'token_rotation_denied',
+            message:'Yetki veya token sürümü değişti. Güncel anahtarı alın; yeni bir yenileme başlatmadan önce sonucu kontrol edin.'});
+        try { await refreshRegistryCache(); }
+        catch (_) { return res.status(503).json({error:'rotation_uncertain',message:'Token kaydedilmiş olabilir. Aynı işlemi tekrar deneyin veya güncel anahtarı alın.'}); }
+        for (const id of boundDeviceIds(result.client)) {
+            const socket=browsers.get(id);
+            if (socket?.readyState===1) socket.send(JSON.stringify({type:'device_permissions_changed'}));
+        }
+        return res.set('Cache-Control','no-store').json({status:'ok',credentialState:{clientId:record.id,secretHash:result.client.secretHash,
+            originDeviceId:result.client.deviceId,
+            credentialRevision:result.client.credentialRevision,credentialRotation:result.client.credentialRotation}});
+    }
+    const policy = management.permissions(device);
+    if (account?.defaultDeviceId !== device.id && !policy.canReadTokens) {
+        return res.status(403).json({error:'token_rotation_denied', message:'Ana cihazdan token alma ve yenileme yetkilerini açın.'});
+    }
+    const {payload, signature} = req.body || {};
+    let request;
+    try { request = JSON.parse(payload); } catch (_) {}
+    if (!request || request.version !== 1 || request.accountId !== device.accountId ||
+        request.clientId !== record.id || request.requesterId !== device.id || !/^[a-f0-9]{64}$/.test(request.previousHash || '') ||
+        !/^[A-Za-z0-9_-]{16,80}$/.test(request.nonce || '') || !Number.isSafeInteger(request.expiresAt) ||
+        request.expiresAt > Date.now() + 65000 ||
+        !management.validSignature(device.managementPublicKey, payload, signature)) {
+        return res.status(400).json({error:'invalid_rotation_request', message:'Yenileme isteği eski ya da imzası geçersiz. Hesap bilgilerini yenileyin.'});
+    }
+    const operationKey = `rotate|${device.id}|${request.nonce}`, fingerprint = sha256(payload);
+    const cached = operations.lookup(operationKey, fingerprint);
+    if (cached) {
+        try { return res.set('Cache-Control','no-store').json(await cached); }
+        catch (_) { return res.status(409).json({error:'token_rotation_failed', message:'Önceki yenilemenin sonucu belirsiz; yeni bir yenileme başlatmadan önce güncel anahtarı alın.'}); }
+    }
+    if (request.expiresAt <= Date.now() || request.previousHash !== record.secretHash) {
+        return res.status(409).json({error:'rotation_request_stale', message:'İstek eski ya da token değişmiş. Önce cihaz listesini yenileyip güncel anahtarı alın.'});
+    }
+    if (account?.defaultDeviceId !== device.id && !policy.canRenewTokens) {
+        return res.status(403).json({error:'token_rotation_denied', message:'Ana cihazdan token yenileme yetkisini açın.'});
+    }
+    const originId = record.deviceId, ws = onlineBrowser(originId);
+    if (!ws) return res.status(409).json({error:'credential_origin_offline', message:'Oturumu oluşturan telefon çevrimdışı. Tokenı o telefon üretir; çevrimiçi olduğunda tekrar deneyin.'});
+    try {
+        const result = await operations.run(operationKey, fingerprint, () => new Promise((resolve, reject) => {
+            const gate = limits.hit('pairing', device.id);
+            if (!gate.allowed) return reject(new Error('Yenileme sınırı doldu. Daha sonra deneyin.'));
+            if (pendingRotations.size >= 100 || pendingRotations.has(request.nonce)) return reject(new Error('Çok fazla bekleyen yenileme var. Sonuçları bekleyin.'));
+            const timeout = setTimeout(() => {
+                pendingRotations.delete(request.nonce);
+                reject(new Error('Yenileme sonucu belirsiz. Token değişmiş olabilir; yeni işlem başlatmadan önce anahtarı yeniden almayı deneyin.'));
+            }, Math.max(1, request.expiresAt - Date.now()));
+            pendingRotations.set(request.nonce, {ws, originId, requesterId:device.id, accountId:device.accountId,
+                clientId:record.id, previousHash:record.secretHash, timeout, resolve, reject});
+            ws.send(JSON.stringify({type:'credential_rotation_request', payload, signature,
+                requesterName:device.name, requesterPublicKey:device.managementPublicKey, backupPolicy:device.backupPolicy || null}), error => {
+                if (!error || !pendingRotations.has(request.nonce)) return;
+                clearTimeout(timeout); pendingRotations.delete(request.nonce); reject(new Error('Kaynak cihaz bağlantısı kesildi. Sonuç belirsiz.'));
+            });
+        }));
+        res.set('Cache-Control', 'no-store').json(result);
+    } catch (_) { res.status(409).json({error:'token_rotation_failed', message:'Token yenileme tamamlanamadı. Kaynak cihaz bağlantısını, onayı ve anahtarı alma durumunu kontrol edin; işlem gerçekleşmiş olabilir.'}); }
 });
 
 app.post('/api/v1/account/main-device/ready', async (req, res) => {
@@ -3157,8 +3302,9 @@ async function accountSyncSnapshot(device) {
     const syncedClients = ownedClients.filter((row) => row.cloudPublished === true);
     return {
         credentialSharingVersion: 1,
+        backupManagementVersion: 1, independentRotationVersion: 2,
         cookieHandoffVersion: 1,
-        credentialPackages,
+        credentialPackages: account?.defaultDeviceId === device.id || management.permissions(device).canReadTokens ? credentialPackages : [],
         mainGeneration: account?.mainGeneration || 0,
         cookieKeyRevision: account?.cookieKeyRevision || 0,
         mainReady: account?.mainReady === true,
@@ -3173,6 +3319,8 @@ async function accountSyncSnapshot(device) {
             isDefault: row.id === account?.defaultDeviceId,
             syncEnabled: row.syncEnabled === true,
             cookieSyncEnabled: row.cookieSyncEnabled === true
+            , managementPublicKey: row.managementPublicKey || '', backupPolicy: row.backupPolicy || null,
+            ...management.permissions(row)
         })),
         clients: syncedClients.map((row) => {
             const encrypted = cookiesByClient.get(row.id);
@@ -3181,6 +3329,7 @@ async function accountSyncSnapshot(device) {
                 clientId: row.id,
                 name: row.name || 'AI istemcisi',
                 secretHash: row.secretHash,
+                credentialRevision: row.credentialRevision || 0, credentialRotation: row.credentialRotation || null,
                 createdAt: row.createdAt || 0,
                 originDeviceId: row.deviceId,
                 // Legacy field name retained for app builds that predate the
@@ -3238,12 +3387,18 @@ app.get('/api/v1/sync/clients/:clientId/credential', async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;
     if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Anahtarı almak için hesabınıza giriş yapın.' });
+    if (accountCache.get(device.accountId)?.defaultDeviceId !== device.id && !management.permissions(device).canReadTokens) {
+        return res.status(403).json({error:'token_read_denied', message:'Bu cihazın token alma yetkisini ana cihazdan açın.'});
+    }
     const packages = await store.listCredentialPackages(device.accountId, device.id);
     const pkg = packages.find(p => p.clientId === req.params.clientId);
     res.set('Cache-Control', 'no-store');
     if (!pkg) return res.status(404).json({ error: 'credential_not_available',
         message: 'Anahtar henüz paylaşılmadı. Oturumu oluşturan telefonda güncel uygulamayı açıp AI oturumu senkronizasyonunu etkinleştirin; ardından tekrar deneyin. Mevcut token değişmez.' });
-    res.json({ credentialPackage: pkg });
+    const current=await store.getClient(pkg.clientId);
+    if (!current || current.accountId!==device.accountId || current.secretHash!==pkg.secretHash || !boundDeviceIds(current).includes(device.id)) return res.status(409).json({error:'rotation_conflict'});
+    res.json({ credentialPackage: pkg, credentialState:{clientId:current.id,originDeviceId:current.deviceId,secretHash:current.secretHash,
+        credentialRevision:current.credentialRevision || 0,credentialRotation:current.credentialRotation || null} });
 });
 
 app.put('/api/v1/sync/clients/:clientId/credential', async (req, res) => {
@@ -4516,7 +4671,9 @@ app.get('/api/status', async (req, res) => {
     });
 });
 
-app.get('/healthz', (req, res) => res.json({ status: 'ok' }));
+app.get('/healthz', (req, res) => res.json({
+    status: 'ok', backupManagementVersion: 1, independentRotationVersion: 2,
+}));
 app.use(errorResponse);
 
 // NOTE: The previous build exposed /oauth/authorize, /oauth/token and

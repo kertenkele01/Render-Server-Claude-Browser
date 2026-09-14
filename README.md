@@ -31,6 +31,8 @@ yönlendirilmiyor.
 | `GET /api/v1/sync` | Hesabın cihazlarını ve geri yüklenebilir AI bağlantılarını birlikte döndürür |
 | `GET /api/v1/devices` | Yalnızca hesabın cihaz envanteri |
 | `GET /api/v1/clients` | Yalnızca hesabın AI bağlantı envanteri; düz metin token içermez |
+| `PUT /api/v1/devices/:id/permissions` | Ana cihazın imzaladığı yedek cihaz yetkilerini kaydeder |
+| `POST /api/v1/clients/:id/rotate` | Yetkili telefonun ürettiği token değişikliğini atomik kaydeder |
 | `POST /api/v1/account/password` | Parola değiştirir |
 | `GET /api/v1/audit` | Hesabın denetim kaydı |
 
@@ -38,6 +40,15 @@ Bu uçlar hesap oturumuyla değil, telefonun zaten elinde olan
 `<deviceId>.<deviceSecret>` kimliğiyle doğrulanır. Uygulama hesap parolasını veya
 oturum çerezini hiç saklamaz, ve **bağlama örtüktür**: giriş yapan cihaz,
 bağlanan cihazdır.
+
+Token yenileme izni bulunan yedek telefon, kaynak veya ana telefon çevrimdışı
+ya da kaldırılmış olsa da yeni Bearer token üretebilir. Röle yalnızca cihazın
+imzaladığı değişikliği ve şifreli token paketini saklar; alıcı telefonlar hesap
+anahtarıyla doğrulama yapmadan yeni tokenı kabul etmez. Token değişikliği oturum
+kimliğini, yerel izinleri, çerezleri veya ana cihaz seçimini değiştirmez.
+Bu özellik Android uygulamasının da güncellenmesini gerektirir.
+`GET /healthz` yanıtındaki `independentRotationVersion: 2` bu protokolün etkin
+olduğunu gösterir. Ayrıntılar: [yedek cihaz yetkileri](docs/backup-device-permissions.md).
 
 ### Panel yalnızca operatörler için
 
