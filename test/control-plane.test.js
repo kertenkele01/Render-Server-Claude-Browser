@@ -899,6 +899,16 @@ test('denetim kaydı tam adres veya içerik tutmaz', async () => {
     await appSignUp(device, 'denetim@test.com', 'cok-guclu-parola-11');
 
     await callTool(`cli_log_1.${secret}`);
+    await fetch(`${BASE}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer cli_log_1.${secret}` },
+        body: JSON.stringify({
+            jsonrpc: '2.0', id: 9, method: 'tools/call',
+            // Unknown names are counted, but this arbitrary value must never
+            // become a persistent analytics dimension.
+            params: { name: `not-a-tool-${secret}`, arguments: {} }
+        })
+    });
     await new Promise((r) => setTimeout(r, 300));
 
     const audit = await appApi(device, 'GET', '/api/v1/audit');
@@ -908,6 +918,24 @@ test('denetim kaydı tam adres veya içerik tutmaz', async () => {
     assert.ok(!dump.includes('token=sir'), 'sorgu dizesi kayda düştü');
     assert.ok(!dump.includes(secret), 'istemci sırrı kayda düştü');
     assert.ok(!dump.includes('merhaba'), 'sayfa içeriği kayda düştü');
+
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const status = await (await visit(operator, '/api/status')).json();
+    const analyticsAccount = status.accounts.find((row) => row.email === 'denetim@test.com');
+    assert.ok(analyticsAccount);
+    const date = new Date().toISOString().slice(0, 10);
+    const analytics = await visit(operator,
+        `/admin/usage?period=custom&from=${date}&to=${date}&group=day&accountId=${analyticsAccount.id}`);
+    assert.equal(analytics.status, 200);
+    const analyticsHtml = await analytics.text();
+    assert.match(analyticsHtml, /Kullanım Analitiği/);
+    assert.match(analyticsHtml, /browser_get_markdown/);
+    assert.match(analyticsHtml, /unknown_tool/);
+    assert.match(analyticsHtml, /denetim@test\.com/);
+    assert.ok(!analyticsHtml.includes('/gizli/yol'), 'tam adres yönetici analitiğine düştü');
+    assert.ok(!analyticsHtml.includes('token=sir'), 'sorgu parametresi yönetici analitiğine düştü');
+    assert.ok(!analyticsHtml.includes(secret), 'istemci sırrı yönetici analitiğine düştü');
+    assert.ok(!analyticsHtml.includes('merhaba'), 'yanıt içeriği yönetici analitiğine düştü');
 
     device.close();
 });

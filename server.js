@@ -286,6 +286,38 @@ async function flushAudit() {
     }
 }
 
+/**
+ * Records only bounded, aggregate tool metadata for the operator dashboard.
+ * Arguments, URLs, hosts, response data and credentials never enter this path.
+ * Analytics must never delay or fail a browser command, so writes are best
+ * effort and deliberately detached from the response path.
+ */
+function recordToolUsage(auth, toolName, status, durationMs = 0) {
+    const accountId = auth?.record?.accountId;
+    if (!accountId || !store) return;
+    const now = Date.now();
+    const requestedToolName = String(toolName || '').toLowerCase();
+    // Unknown names are collapsed instead of echoed into persistent storage;
+    // a caller must not be able to smuggle arbitrary text into analytics by
+    // pretending it is a tool name.
+    const knownToolNames = new Set(TOOLS.map((tool) => tool.name).concat([
+        'get_tool_documentation', 'browser_get_skills', 'get_skills',
+        'browser_get_local_markdown', 'browser_get_crawl4ai_markdown',
+        'browser_switch_session'
+    ]));
+    const safeToolName = knownToolNames.has(requestedToolName) ? requestedToolName : 'unknown_tool';
+    const safeStatus = ['success', 'error', 'quota'].includes(status) ? status : 'error';
+    store.recordToolUsage({
+        accountId,
+        clientId: String(auth.clientId || '').substring(0, 64),
+        toolName: safeToolName,
+        status: safeStatus,
+        durationMs: Math.min(Math.max(0, Number(durationMs) || 0), 86400000),
+        createdAt: now,
+        dayStart: Math.floor(now / 86400000) * 86400000
+    }).catch((e) => console.warn('[Analytics] Araç sayacı yazılamadı:', e.message));
+}
+
 // Standard MCP Tools schema
 const TOOLS = [
     {
@@ -1989,9 +2021,11 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
     // 4. Handle tools execution
     if (method === 'tools/call') {
         const toolName = params?.name;
+        const toolStartedAt = Date.now();
         const args = params?.arguments || {};
         const problem = argumentsProblem(args);
         if (problem) {
+            recordToolUsage(auth, toolName, 'error', Date.now() - toolStartedAt);
             reply(null, { code: -32602, message: `Invalid arguments: ${problem}` });
             return 'handled';
         }
@@ -2013,6 +2047,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
                     text: JSON.stringify(toolDocResponse, null, 2)
                 }
             ];
+            recordToolUsage(auth, toolName, 'success', Date.now() - toolStartedAt);
             reply({ content });
             return 'handled';
         }
@@ -2029,6 +2064,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
                 };
             });
             addLog(auth.clientId, ctx.clientName, 'köprü', 'Cihazlar Listelendi', 'success', `${deviceList.length} yetkili cihaz`);
+            recordToolUsage(auth, toolName, 'success', Date.now() - toolStartedAt);
             reply({
                 content: [{
                     type: "text",
@@ -2073,12 +2109,14 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             case "browser_clear_session_data": actionType = "clear_session_data"; break;
             case "browser_screenshot": actionType = "screenshot"; break;
             case "browser_switch_session":
+                recordToolUsage(auth, toolName, 'error', Date.now() - toolStartedAt);
                 reply({
                     isError: true,
                     content: [{ type: "text", text: "Oturum değiştirme kaldırıldı. Her istemci kendi izole profiline sabitlenmiştir; profil seçimi yalnızca cihaz sahibinin kararıdır." }]
                 });
                 return 'handled';
             default:
+                recordToolUsage(auth, toolName, 'error', Date.now() - toolStartedAt);
                 reply(null, { code: -32601, message: `Tool not found: ${toolName}` });
                 return 'handled';
         }
@@ -2090,6 +2128,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             reply({ isError: true, content: [{ type: 'text', text: message }] });
         }))) {
             addLog(auth.clientId, clientName, boundDeviceId, `Kota aşıldı: ${toolName}`, 'error', 'Günlük komut kotası doldu.');
+            recordToolUsage(auth, toolName, 'quota', Date.now() - toolStartedAt);
             return 'handled';
         }
 
@@ -2114,6 +2153,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             const host = hostOf(responseData.url);
             if (host) parts.push(host);
             addLog(auth.clientId, clientName, actualDeviceId, `Tamamlandı: ${toolName}`, 'success', parts.join(' · '));
+            recordToolUsage(auth, toolName, 'success', Date.now() - toolStartedAt);
 
             // An image comes back as an MCP image block, not as base64 buried in
             // a JSON string: the client has to be able to actually look at it.
@@ -2133,6 +2173,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             reply({ content: [{ type: "text", text: JSON.stringify(responseData, null, 2) }] });
         } catch (error) {
             addLog(auth.clientId, clientName, boundDeviceId, `Hata: ${toolName}`, 'error', error?.name || 'Araç hatası');
+            recordToolUsage(auth, toolName, 'error', Date.now() - toolStartedAt);
             reply({
                 isError: true,
                 content: [{ type: "text", text: `Hata: ${error.message}` }]
@@ -2306,10 +2347,15 @@ function finalizeMarkdownResponse(toolName, responseData) {
 const directToolHandler = async (type, req, res) => {
     const auth = requireAuth(req, res);
     if (!auth) return;
+    const toolName = `browser_${type}`;
+    const toolStartedAt = Date.now();
 
     const args = (req.method === 'POST' ? req.body : req.query) || {};
     const problem = argumentsProblem(args);
-    if (problem) return res.status(400).json({ error: 'invalid_arguments', message: problem });
+    if (problem) {
+        recordToolUsage(auth, toolName, 'error', Date.now() - toolStartedAt);
+        return res.status(400).json({ error: 'invalid_arguments', message: problem });
+    }
     const requestedDeviceId = String(args.deviceId || '').trim() || null;
     const cleanArgs = { ...args };
     delete cleanArgs.deviceId;
@@ -2320,6 +2366,7 @@ const directToolHandler = async (type, req, res) => {
     let quotaMessage = null;
     if (!(await enforceQuota(auth, (message) => { quotaMessage = message; }))) {
         addLog(auth.clientId, clientName, deviceId, `Kota aşıldı: ${type}`, 'error', 'Günlük komut kotası doldu.');
+        recordToolUsage(auth, toolName, 'quota', Date.now() - toolStartedAt);
         return res.status(429).json({ error: 'quota_exceeded', message: quotaMessage });
     }
 
@@ -2334,9 +2381,11 @@ const directToolHandler = async (type, req, res) => {
         );
         responseData = finalizeMarkdownResponse(type, responseData);
         addLog(auth.clientId, clientName, responseData.deviceId || deviceId, `REST tamam: ${type}`, 'success', hostOf(responseData.url));
+        recordToolUsage(auth, toolName, 'success', Date.now() - toolStartedAt);
         return res.json({ status: "success", data: responseData });
     } catch (error) {
         addLog(auth.clientId, clientName, deviceId, `REST hata: ${type}`, 'error', error?.name || 'Araç hatası');
+        recordToolUsage(auth, toolName, 'error', Date.now() - toolStartedAt);
         return res.status(502).json({ status: "error", error: error.message });
     }
 };
@@ -4033,6 +4082,118 @@ async function requireOperator(req, res) {
     return ctx;
 }
 
+const ANALYTICS_DAY_MS = 86400000;
+
+function isoDate(ts) {
+    return new Date(ts).toISOString().slice(0, 10);
+}
+
+function usageDateRange(query, now = Date.now()) {
+    const today = Math.floor(now / ANALYTICS_DAY_MS) * ANALYTICS_DAY_MS;
+    const period = ['today', '7d', '30d', 'month', 'year', 'custom'].includes(String(query.period || ''))
+        ? String(query.period) : '7d';
+    let from = today - 6 * ANALYTICS_DAY_MS;
+    let to = today + ANALYTICS_DAY_MS;
+
+    if (period === 'today') from = today;
+    if (period === '30d') from = today - 29 * ANALYTICS_DAY_MS;
+    if (period === 'month') {
+        const d = new Date(today);
+        from = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    }
+    if (period === 'year') {
+        const d = new Date(today);
+        from = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 11, 1);
+    }
+    if (period === 'custom') {
+        const parse = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))
+            ? Date.parse(`${value}T00:00:00Z`) : NaN;
+        const customFrom = parse(query.from);
+        const customTo = parse(query.to);
+        if (Number.isFinite(customFrom) && Number.isFinite(customTo) && customFrom <= customTo) {
+            from = customFrom;
+            to = customTo + ANALYTICS_DAY_MS;
+        }
+    }
+
+    // Bound a single dashboard query to one year. Older periods remain
+    // available by choosing another custom range.
+    if (to - from > 366 * ANALYTICS_DAY_MS) from = to - 366 * ANALYTICS_DAY_MS;
+    const group = String(query.group || '') === 'month' ? 'month' : 'day';
+    return { period, group, from, to, fromDate: isoDate(from), toDate: isoDate(to - ANALYTICS_DAY_MS) };
+}
+
+function summariseToolUsage(rows, group) {
+    const sum = (map, key, seed) => {
+        if (!map.has(key)) map.set(key, seed());
+        return map.get(key);
+    };
+    const seriesMap = new Map();
+    const toolMap = new Map();
+    const userToolMap = new Map();
+    let totalCalls = 0;
+    let successCalls = 0;
+    let totalDurationMs = 0;
+    const accounts = new Set();
+
+    rows.forEach((row) => {
+        const count = Number(row.callCount || 0);
+        const duration = Number(row.totalDurationMs || 0);
+        totalCalls += count;
+        totalDurationMs += duration;
+        if (row.status === 'success') successCalls += count;
+        accounts.add(row.accountId);
+
+        const date = new Date(row.dayStart);
+        const bucketStart = group === 'month'
+            ? Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)
+            : row.dayStart;
+        const series = sum(seriesMap, bucketStart, () => ({ bucketStart, calls: 0, successes: 0, failures: 0 }));
+        series.calls += count;
+        if (row.status === 'success') series.successes += count;
+        else series.failures += count;
+
+        const tool = sum(toolMap, row.toolName, () => ({
+            toolName: row.toolName, calls: 0, successes: 0, failures: 0,
+            totalDurationMs: 0, lastUsedAt: 0
+        }));
+        tool.calls += count;
+        tool.totalDurationMs += duration;
+        tool.lastUsedAt = Math.max(tool.lastUsedAt, row.lastUsedAt);
+        if (row.status === 'success') tool.successes += count;
+        else tool.failures += count;
+
+        const userKey = [row.accountId, row.clientId || '', row.toolName].join('|');
+        const userTool = sum(userToolMap, userKey, () => ({
+            accountId: row.accountId, accountEmail: row.accountEmail,
+            clientId: row.clientId, clientName: row.clientName, toolName: row.toolName,
+            calls: 0, successes: 0, failures: 0, quota: 0,
+            totalDurationMs: 0, lastUsedAt: 0
+        }));
+        userTool.calls += count;
+        userTool.totalDurationMs += duration;
+        userTool.lastUsedAt = Math.max(userTool.lastUsedAt, row.lastUsedAt);
+        if (row.status === 'success') userTool.successes += count;
+        else userTool.failures += count;
+        if (row.status === 'quota') userTool.quota += count;
+    });
+
+    const withAverage = (row) => ({ ...row, averageDurationMs: row.calls ? Math.round(row.totalDurationMs / row.calls) : 0 });
+    return {
+        totals: {
+            calls: totalCalls,
+            successes: successCalls,
+            failures: totalCalls - successCalls,
+            successRate: totalCalls ? Math.round(successCalls * 1000 / totalCalls) / 10 : 0,
+            averageDurationMs: totalCalls ? Math.round(totalDurationMs / totalCalls) : 0,
+            accounts: accounts.size
+        },
+        series: [...seriesMap.values()].sort((a, b) => a.bucketStart - b.bucketStart),
+        tools: [...toolMap.values()].map(withAverage).sort((a, b) => b.calls - a.calls || a.toolName.localeCompare(b.toolName)),
+        userTools: [...userToolMap.values()].map(withAverage).sort((a, b) => b.lastUsedAt - a.lastUsedAt)
+    };
+}
+
 app.get('/', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
@@ -4105,6 +4266,30 @@ app.get('/admin/users', async (req, res) => {
         csrf,
         error: req.query.err ? String(req.query.err).substring(0, 200) : '',
         notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
+    }));
+});
+
+app.get('/admin/usage', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+
+    const range = usageDateRange(req.query);
+    const accountsList = await store.listAccounts({ limit: 1000 });
+    const requestedAccountId = String(req.query.accountId || '').trim();
+    const accountId = accountsList.some((row) => row.id === requestedAccountId) ? requestedAccountId : null;
+    const records = await store.listToolUsage({ from: range.from, to: range.to, accountId });
+    const availableTools = [...new Set(records.map((row) => row.toolName))].sort();
+    const requestedTool = String(req.query.tool || '').trim().substring(0, 80);
+    const tool = availableTools.includes(requestedTool) ? requestedTool : '';
+    const filtered = tool ? records.filter((row) => row.toolName === tool) : records;
+
+    panelHeaders(res);
+    res.send(panel.renderUsageAnalytics({
+        account: ctx.account,
+        accounts: accountsList,
+        filters: { ...range, accountId: accountId || '', tool },
+        availableTools,
+        analytics: summariseToolUsage(filtered, range.group)
     }));
 });
 
