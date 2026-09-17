@@ -52,3 +52,39 @@ test('araç analitiği yalnızca toplulaştırılmış güvenli alanları saklar
     assert.ok(!persisted.includes('example.com'));
     assert.ok(!persisted.includes('never-store-this'));
 });
+
+test('son denetim kayıtları kullanıcıya göre filtrelenir ve yeniden eskiye sıralanır', async (t) => {
+    const stateFile = path.join(os.tmpdir(), `bridge-audit-${process.pid}-${Date.now()}.json`);
+    t.after(() => { try { fs.unlinkSync(stateFile); } catch (e) {} });
+
+    const store = await openStore({ stateFile });
+    const account = await store.createAccount({
+        email: 'birinci@test.com', passwordHash: 'hash', passwordSalt: 'salt'
+    });
+    const other = await store.createAccount({
+        email: 'ikinci@test.com', passwordHash: 'hash', passwordSalt: 'salt'
+    });
+
+    await store.appendAudit({
+        accountId: account.id, clientId: 'cli_a', action: 'SSE Bağlantısı',
+        status: 'success', detail: 'sakli-ayrinti', host: 'private.example', createdAt: 1000
+    });
+    await store.appendAudit({
+        accountId: other.id, clientId: 'cli_b', action: 'Tamamlandı: browser_click',
+        status: 'success', createdAt: 2000
+    });
+    await store.appendAudit({
+        accountId: account.id, clientId: 'cli_a', action: 'Tamamlandı: browser_get_markdown',
+        status: 'success', createdAt: 3000
+    });
+
+    const rows = await store.listRecentAudit({ accountId: account.id, limit: 10 });
+    assert.deepEqual(rows.map((row) => row.action), [
+        'Tamamlandı: browser_get_markdown',
+        'SSE Bağlantısı'
+    ]);
+    assert.ok(rows.every((row) => row.accountId === account.id));
+    assert.ok(rows.every((row) => row.accountEmail === 'birinci@test.com'));
+
+    await store.close();
+});

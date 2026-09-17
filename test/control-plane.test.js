@@ -932,10 +932,23 @@ test('denetim kaydı tam adres veya içerik tutmaz', async () => {
     assert.match(analyticsHtml, /browser_get_markdown/);
     assert.match(analyticsHtml, /unknown_tool/);
     assert.match(analyticsHtml, /denetim@test\.com/);
+    assert.match(analyticsHtml, /Son Bağlantı ve Tool Logları/);
+    assert.match(analyticsHtml, /Telefon bağlandı/);
     assert.ok(!analyticsHtml.includes('/gizli/yol'), 'tam adres yönetici analitiğine düştü');
     assert.ok(!analyticsHtml.includes('token=sir'), 'sorgu parametresi yönetici analitiğine düştü');
     assert.ok(!analyticsHtml.includes(secret), 'istemci sırrı yönetici analitiğine düştü');
     assert.ok(!analyticsHtml.includes('merhaba'), 'yanıt içeriği yönetici analitiğine düştü');
+
+    const userDetail = await visit(operator, `/admin/users/${analyticsAccount.id}`);
+    assert.equal(userDetail.status, 200);
+    const userDetailHtml = await userDetail.text();
+    assert.match(userDetailHtml, /Bu Kullanıcının Son Logları/);
+    assert.match(userDetailHtml, /browser_get_markdown/);
+    assert.match(userDetailHtml, /Kayıt istemcisi/);
+    assert.ok(!userDetailHtml.includes('/gizli/yol'), 'tam adres kullanıcı loglarına düştü');
+    assert.ok(!userDetailHtml.includes('token=sir'), 'sorgu parametresi kullanıcı loglarına düştü');
+    assert.ok(!userDetailHtml.includes(secret), 'istemci sırrı kullanıcı loglarına düştü');
+    assert.ok(!userDetailHtml.includes('merhaba'), 'yanıt içeriği kullanıcı loglarına düştü');
 
     device.close();
 });

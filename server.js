@@ -4194,6 +4194,72 @@ function summariseToolUsage(rows, group) {
     };
 }
 
+const ADMIN_CONNECTION_LOGS = new Map([
+    ['SSE Bağlantısı', 'MCP bağlantısı açıldı'],
+    ['Bağlantı Kesildi', 'MCP bağlantısı kapandı'],
+    ['Sistem Hazır', 'MCP bağlantısı hazır'],
+    ['Başlatma', 'MCP istemcisi başlatıldı'],
+    ['Cihaz Bağlandı', 'Telefon bağlandı'],
+    ['Cihaz Ayrıldı', 'Telefon bağlantısı kapandı'],
+    ['Cihaz Bağı Koparıldı', 'Telefon hesap bağlantısı kapandı'],
+    ['İstemci Eklendi', 'AI bağlantısı eklendi'],
+    ['İstemci İptal Edildi', 'AI bağlantısı iptal edildi']
+]);
+
+function adminActivityLog(event) {
+    const action = String(event.action || '');
+    const connection = ADMIN_CONNECTION_LOGS.get(action);
+    if (connection) {
+        return {
+            accountId: event.accountId,
+            accountEmail: event.accountEmail || 'Silinmiş hesap',
+            clientName: event.clientName || '—',
+            kind: 'connection',
+            name: connection,
+            status: ['success', 'error', 'warning', 'info'].includes(event.status) ? event.status : 'info',
+            createdAt: Number(event.createdAt || 0)
+        };
+    }
+
+    const prefixes = [
+        ['Tamamlandı: ', 'success'],
+        ['Hata: ', 'error'],
+        ['Kota aşıldı: ', 'quota'],
+        ['REST tamam: ', 'success'],
+        ['REST hata: ', 'error'],
+        ['Dokümantasyon: ', 'success']
+    ];
+    const match = prefixes.find(([prefix]) => action.startsWith(prefix));
+    if (!match && action !== 'Cihazlar Listelendi') return null;
+    const rawName = action === 'Cihazlar Listelendi' ? 'browser_list_sessions' : action.slice(match[0].length).toLowerCase();
+    const canonicalName = rawName.startsWith('browser_') ? rawName : `browser_${rawName}`;
+    const knownTools = new Set(TOOLS.map((tool) => tool.name).concat([
+        'get_tool_documentation', 'browser_get_skills', 'get_skills',
+        'browser_get_local_markdown', 'browser_get_crawl4ai_markdown',
+        'browser_switch_session', 'browser_list_sessions'
+    ]));
+    const safeName = knownTools.has(rawName) ? rawName : (knownTools.has(canonicalName) ? canonicalName : 'unknown_tool');
+    return {
+        accountId: event.accountId,
+        accountEmail: event.accountEmail || 'Silinmiş hesap',
+        clientName: event.clientName || '—',
+        kind: 'tool',
+        name: safeName,
+        status: match ? match[1] : 'success',
+        createdAt: Number(event.createdAt || 0)
+    };
+}
+
+function recentAdminActivity(events, { from = 0, to = Number.MAX_SAFE_INTEGER, tool = '', limit = 100 } = {}) {
+    return events
+        .map(adminActivityLog)
+        .filter(Boolean)
+        .filter((event) => event.createdAt >= from && event.createdAt < to)
+        .filter((event) => !tool || (event.kind === 'tool' && event.name === tool))
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, Math.min(Math.max(1, Number(limit) || 100), 500));
+}
+
 app.get('/', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
@@ -4277,7 +4343,10 @@ app.get('/admin/usage', async (req, res) => {
     const accountsList = await store.listAccounts({ limit: 1000 });
     const requestedAccountId = String(req.query.accountId || '').trim();
     const accountId = accountsList.some((row) => row.id === requestedAccountId) ? requestedAccountId : null;
-    const records = await store.listToolUsage({ from: range.from, to: range.to, accountId });
+    const [records, recentAudit] = await Promise.all([
+        store.listToolUsage({ from: range.from, to: range.to, accountId }),
+        store.listRecentAudit({ accountId, limit: 3000 })
+    ]);
     const availableTools = [...new Set(records.map((row) => row.toolName))].sort();
     const requestedTool = String(req.query.tool || '').trim().substring(0, 80);
     const tool = availableTools.includes(requestedTool) ? requestedTool : '';
@@ -4289,7 +4358,8 @@ app.get('/admin/usage', async (req, res) => {
         accounts: accountsList,
         filters: { ...range, accountId: accountId || '', tool },
         availableTools,
-        analytics: summariseToolUsage(filtered, range.group)
+        analytics: summariseToolUsage(filtered, range.group),
+        recentLogs: recentAdminActivity(recentAudit, { from: range.from, to: range.to, tool, limit: 100 })
     }));
 });
 
@@ -4308,11 +4378,12 @@ app.get('/admin/users/:accountId', async (req, res) => {
             linkText: 'Kullanıcı listesine dön'
         }));
     }
-    const [deviceCount, clientCount, activeSessions, usageByAccount] = await Promise.all([
+    const [deviceCount, clientCount, activeSessions, usageByAccount, recentAudit] = await Promise.all([
         store.countDevices(accountId),
         store.countClients(accountId),
         store.countActiveWebSessions(accountId),
-        store.usageForAccounts([accountId], limits.currentUsageWindow())
+        store.usageForAccounts([accountId], limits.currentUsageWindow()),
+        store.listRecentAudit({ accountId, limit: 2000 })
     ]);
     const publicTarget = {
         id: target.id,
@@ -4330,6 +4401,7 @@ app.get('/admin/users/:accountId', async (req, res) => {
         target: publicTarget,
         usage: usageByAccount.get(accountId) || 0,
         activeSessions,
+        recentLogs: recentAdminActivity(recentAudit, { limit: 100 }),
         csrf: ensureCsrfCookie(req, res, ctx.csrf),
         error: req.query.err ? String(req.query.err).substring(0, 200) : '',
         notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
