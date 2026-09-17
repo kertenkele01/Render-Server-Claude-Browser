@@ -6,6 +6,26 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { openStore } = require('../lib/store');
+const { cataloguePayload } = require('../lib/quick-links');
+
+test('AI catalogue translates legacy built-in system copy without changing URLs', () => {
+    const payload = cataloguePayload([{
+        id: 'flight-google',
+        categoryId: 'category-flight',
+        category: 'Uçuş',
+        categoryOrder: 50,
+        name: 'Google Flights',
+        url: 'https://www.google.com/travel/flights?campaign=kept',
+        description: 'Tarih ve rota bazında uçuş fiyatlarını hızlı karşılaştırmak için.',
+        sortOrder: 10,
+        active: true
+    }], 7);
+
+    assert.equal(payload.categories[0].title, 'Flights');
+    assert.match(payload.categories[0].sites[0].description, /flight comparison/i);
+    assert.equal(payload.categories[0].sites[0].url,
+        'https://www.google.com/travel/flights?campaign=kept');
+});
 
 test('operator quick links persist affiliate URLs and catalogue revision', async () => {
     const stateFile = path.join(os.tmpdir(), `bridge-quick-links-${process.pid}-${Date.now()}.json`);
@@ -17,7 +37,7 @@ test('operator quick links persist affiliate URLs and catalogue revision', async
         assert.ok(initial.links.every((link) => link.description),
             'default links should include short AI descriptions');
         const categories = await store.listQuickLinkCategories();
-        const flight = categories.find((category) => category.title === 'Uçuş');
+        const flight = categories.find((category) => category.title === 'Flights');
         assert.ok(flight, 'default category was not seeded');
 
         const saved = await store.upsertQuickLink({

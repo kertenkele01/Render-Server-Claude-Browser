@@ -584,7 +584,7 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
 
     const refused = await callTool(token, { deviceId: 'dev_hesap_disinda' });
     assert.equal(refused.status, 502);
-    assert.match((await refused.json()).error, /yetkili değil/i);
+    assert.match((await refused.json()).error, /not authorized/i);
 
     const secondGeneration = changedDefault.body.mainGeneration;
     assert.equal(changedDefault.body.mainReady, false, 'yeni ana cihaz hazırlanmadan yazabilir');
@@ -1117,4 +1117,63 @@ test('şifreli anahtar geçişi ve kapalı eşitlemede bulut yedeği yönetimi h
     assert.deepEqual((await appApi(device, 'GET', '/api/v1/sync/cookie-backups')).body.backups, []);
     assert.equal((await appApi(device, 'GET', '/api/v1/account')).body.sessionSyncEnabled, false);
     device.close(); foreign.close();
+});
+
+test('giriş yapmış yedek ana cihazda sonradan eklenen oturumu ve şifreli paketleri yeniden giriş yapmadan görür', async (t) => {
+    const email = 'late-session@test.com', password = 'late-session-password';
+    const main = await connectDevice('dev_late_main', 'late-main-device-secret');
+    t.after(() => main.close());
+    const account = await appSignUp(main, email, password);
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    await form(operator, '/admin/accounts/plan', { accountId: account.accountId, plan: 'pro' });
+    const backup = await connectDevice('dev_late_backup', 'late-backup-device-secret');
+    t.after(() => backup.close());
+    assert.equal((await appApi(backup, 'POST', '/api/v1/login', { email, password })).status, 200);
+    for (const device of [main, backup]) {
+        assert.equal((await appApi(device, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: true, cookiesEnabled: true })).status, 200);
+    }
+    const selected = await appApi(main, 'POST', '/api/v1/account/main-device', { deviceId: 'dev_late_main' });
+    assert.equal(selected.status, 200);
+    assert.equal((await appApi(main, 'POST', '/api/v1/account/main-device/ready', { generation: selected.body.mainGeneration })).status, 200);
+    assert.equal((await appApi(backup, 'GET', '/api/v1/sync')).body.clients.length, 0);
+
+    const clientId = 'cli_added_after_backup_login', secret = 'late-session-existing-secret', hash = sha256(secret);
+    main.send({ type: 'client_added', clientId, secretHash: hash, name: 'New AI session' });
+    let inventory;
+    for (let attempt = 0; attempt < 25; attempt++) {
+        inventory = (await appApi(backup, 'GET', '/api/v1/sync')).body;
+        if (inventory.clients.some(c => c.clientId === clientId)) break;
+        await new Promise(resolve => setTimeout(resolve, 40));
+    }
+    assert.equal(inventory.clients.length, 1, 'existing backup could not discover the new session');
+    assert.deepEqual(inventory.clients[0].deviceIds, ['dev_late_main'], 'inventory discovery silently bound the backup');
+    const accountKey = crypto.pbkdf2Sync(password, `mcp-account-cookie-sync-v2|${account.accountId}`, 120000, 32, 'sha256');
+    function encrypt(key, aad, plaintext) {
+        const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+        cipher.setAAD(Buffer.from(aad));
+        return { iv: iv.toString('base64'), ciphertext: Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]).toString('base64') };
+    }
+    const tokenKey = crypto.createHmac('sha256', accountKey).update('mcp-client-credential-key-v1').digest();
+    const tokenPackage = encrypt(tokenKey, `credential-v1|${account.accountId.length}:${account.accountId}|${clientId.length}:${clientId}|${hash}`, secret);
+    const endpoint = `/api/v1/sync/clients/${clientId}/credential`;
+    assert.equal((await appApi(main, 'PUT', endpoint, { version: 1, secretHash: hash, cookieKeyRevision: 0, ...tokenPackage })).status, 200);
+    await appApi(main, 'POST', `/api/v1/sync/clients/${clientId}/cookies/enable`);
+    const cookiePackage = encrypt(accountKey, `cookie-sync-v2|${clientId}`, JSON.stringify({ version: 2, clientId, cookies: [{ url: 'https://late-test.example', header: 'session=test-baseline' }] }));
+    assert.equal((await appApi(main, 'PUT', `/api/v1/sync/clients/${clientId}/cookies`, {
+        version: 2, generation: selected.body.mainGeneration, cookieKeyRevision: 0, ...cookiePackage
+    })).status, 200);
+    inventory = (await appApi(backup, 'GET', '/api/v1/sync')).body;
+    assert.equal(inventory.clients[0].cookieSnapshot.ciphertext, cookiePackage.ciphertext);
+    assert.equal(inventory.credentialPackages.length, 0, 'backup read secret package before accepting the session');
+    backup.send({ type: 'client_added', clientId, secretHash: hash, name: 'New AI session' });
+    let downloaded;
+    for (let attempt = 0; attempt < 25; attempt++) {
+        downloaded = await appApi(backup, 'GET', endpoint);
+        if (downloaded.status === 200) break;
+        await new Promise(resolve => setTimeout(resolve, 40));
+    }
+    assert.equal(downloaded.status, 200);
+    assert.equal(downloaded.body.credentialPackage.ciphertext, tokenPackage.ciphertext);
+    assert.equal(JSON.stringify(inventory).includes(secret), false);
+    assert.equal(JSON.stringify(inventory).includes('session=test-baseline'), false);
 });

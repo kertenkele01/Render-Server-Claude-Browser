@@ -707,11 +707,182 @@ const TOOLS = [
     }
 ];
 
+// This is the copy exposed to MCP clients. Keep it in English even when the
+// owner-facing Android and operator interfaces are localized: these strings
+// are instructions for models, not UI labels for the phone owner.
+const AI_TOOL_COPY = {
+    browser_get_tool_documentation: {
+        description: "Returns the complete operating guide for this Android browser: tool parameters, recommended workflows, form-filling rules, shortcut usage, CAPTCHA handling, safety boundaries, and recovery guidance. Call it with a tool name for focused help or with 'all' for the full browser playbook.",
+        params: {
+            tool_name: "Tool to document, for example 'browser_fill_form', 'browser_click', or 'all'. Defaults to 'all'.",
+            category: "Optional category filter: 'all', 'navigation', 'interaction', 'content_extraction', 'tabs_and_sessions', or 'meta'."
+        },
+        bestPractice: "Read the full guide before a complex browsing task, or request one tool when a response tells you to change strategy."
+    },
+    browser_list_devices: {
+        description: "Lists Android devices already authorized for this AI connection, including deviceId, display name, online state, and whether each is the default target. If more than one phone is available, call this before another browser tool and pass the chosen deviceId. This tool cannot authorize a new device.",
+        bestPractice: "Select an online device explicitly when multiple devices are bound; omitting deviceId uses the current default route."
+    },
+    browser_navigate: {
+        description: "Opens an absolute HTTP(S) URL and returns the final URL, title, headings, element counts, and loading state. Use read=true when you know you need the page's Markdown immediately. A still_loading result is a usable partial state, not a failure.",
+        params: { url: "Absolute HTTP or HTTPS URL to open.", read: "When true, include the page's Markdown interaction map in the same response.", offset: "Markdown character offset when read=true; use next_offset to continue a chunked response." },
+        bestPractice: "Inspect the returned summary before fetching a large page. After navigation, obtain fresh element IDs before interacting."
+    },
+    browser_reload: {
+        description: "Performs a real reload of the current document and returns its refreshed summary. Use it for stale content or a transient load failure, not as a loop for CAPTCHA or an uncertain submission.",
+        params: { read: "When true, include refreshed Markdown.", offset: "Markdown character offset when read=true.", tabId: "Optional tab to reload; defaults to the active tab." },
+        bestPractice: "If an action may already have succeeded, inspect the page before reloading or repeating it."
+    },
+    browser_search: {
+        description: "Runs a Google search and returns the result page summary. Set read=true or call browser_get_markdown to inspect result links.",
+        params: { query: "Search query.", read: "When true, include result-page Markdown.", offset: "Markdown character offset when read=true." },
+        bestPractice: "Prefer browser_list_shortcuts first when a recommended site directly matches the task; otherwise search normally."
+    },
+    browser_screenshot: {
+        description: "Captures the tab as JPEG. With grid=true it overlays labeled cells on the visible viewport and returns a one-use screenshot_id for browser_click_at. Prefer DOM element IDs; use coordinate clicks only for canvas, maps, cross-origin frames, or controls absent from the interaction map.",
+        params: { fullPage: "Capture the full document when supported; ignored in grid mode and sometimes for the visible on-screen tab.", grid: "Overlay a coordinate grid and issue a short-lived screenshot_id.", grid_columns: "Grid columns, 4-26; default 15.", grid_rows: "Grid rows, 4-40; default 24.", tabId: "Optional target tab; defaults to the active tab." },
+        bestPractice: "Use a fresh grid capture and click immediately. Never infer coordinates from an old screenshot after scrolling or navigation."
+    },
+    browser_get_html: {
+        description: "Returns the current page's raw HTML, URL, and title. Large documents are chunked; continue with next_offset when has_more is true.",
+        params: { offset: "HTML character offset; use next_offset to continue." },
+        bestPractice: "Use only when Markdown lacks a needed DOM attribute or selector; browser_get_markdown is the normal reading tool."
+    },
+    browser_get_markdown: {
+        description: "Returns an on-device Markdown interaction map of the current page. Interactive elements receive numeric IDs that can be passed to browser_click, browser_type, and form tools. Credential values are never exposed. Continue with next_offset when has_more is true.",
+        params: { offset: "Start at 0; use the previous next_offset for the next chunk." },
+        bestPractice: "Read again after navigation or a substantial DOM change because old numeric element IDs become stale."
+    },
+    browser_scroll: {
+        description: "Scrolls the current page up or down.",
+        params: { direction: "'up' or 'down'; defaults to 'down'." },
+        bestPractice: "After scrolling, read or capture the new viewport before choosing a target."
+    },
+    browser_click: {
+        description: "Clicks a DOM element using its numeric interaction-map ID or a CSS selector and reports the effect. Prefer numeric IDs from fresh Markdown. If page_changed is false, inspect the page instead of repeating the same click.",
+        params: { selector: "Numeric element ID from browser_get_markdown, or a CSS selector." },
+        bestPractice: "Do not click native <select> controls; use browser_select_option. Re-read the page after new_url or a major change."
+    },
+    browser_click_at: {
+        description: "Sends a real Android tap to a cell or pixel from a fresh browser_screenshot(grid=true). This is a visual fallback for targets not represented in the DOM map. The screenshot is single-use and expires after 30 seconds or any viewport change.",
+        params: { screenshot_id: "One-use ID returned by browser_screenshot(grid=true).", cell: "Grid cell such as H12; do not combine with x/y.", x_ratio: "Horizontal position inside the cell, 0-1; default 0.5.", y_ratio: "Vertical position inside the cell, 0-1; default 0.5.", x: "Exact JPEG x pixel; provide together with y and without cell.", y: "Exact JPEG y pixel; provide together with x and without cell.", tabId: "Optional; normally inferred from screenshot_id." },
+        bestPractice: "Prefer browser_click. Never use coordinates to work around a disabled control, file picker, native select, or CAPTCHA."
+    },
+    browser_press_key: {
+        description: "Sends a keyboard key such as Enter, Escape, Tab, or ArrowDown to a target or the focused element. Useful for autocomplete selection and keyboard-driven widgets.",
+        params: { key: "Key name: Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Backspace, Delete, Home, End, PageUp, or PageDown.", selector: "Optional numeric element ID or CSS selector; defaults to the focused element." },
+        bestPractice: "For autocomplete, type first, inspect suggestions, then use ArrowDown + Enter only when the intended suggestion is clear."
+    },
+    browser_wait_for: {
+        description: "Waits until a selector or case-insensitive text appears. A timeout is an observation, not a transport failure; inspect the page instead of repeating the same wait indefinitely.",
+        params: { selector: "CSS selector or numeric element ID to wait for.", text: "Visible text to wait for.", timeout_ms: "Maximum wait, 500-20000 ms; default 8000." },
+        bestPractice: "Use after an action that starts asynchronous loading, then read the resulting page or form state."
+    },
+    browser_execute_js: {
+        description: "Executes JavaScript in the page and returns the result. The permission is disabled by default and may require a fresh owner approval. Use standard browser tools whenever possible.",
+        params: { script: "JavaScript source to execute." },
+        bestPractice: "Make one narrow, auditable call; do not use JavaScript to bypass permissions, CAPTCHA, or protected UI."
+    },
+    browser_type: {
+        description: "Types into one field using framework-compatible input and keyboard events. Search and autocomplete fields are typed character by character. Password, OTP, and payment fields require sensitive_fields permission and may prompt the owner.",
+        params: { selector: "Numeric element ID or CSS selector.", text: "Text to enter; existing text is cleared first.", keystroke: "Force character-by-character input when a widget does not open suggestions." },
+        bestPractice: "If suggestions appear, select the intended item; visible text alone may not set the widget's hidden value."
+    },
+    browser_select_option: {
+        description: "Selects an option in a native <select> or supported listbox and dispatches the page's change event. Do not click native selects because Android's system picker is outside the web page and cannot be controlled by the agent.",
+        params: { selector: "Select element's numeric ID or CSS selector.", label: "Visible option text.", value: "Optional option value instead of label.", index: "Optional zero-based option index." },
+        bestPractice: "Read available options with browser_read_form and prefer label over index."
+    },
+    browser_pick_date: {
+        description: "Selects a date in a native date input or supported calendar widget, navigating to the correct month when necessary.",
+        params: { date: "Date in YYYY-MM-DD format.", selector: "Optional date field or calendar-opener element ID; omit if the calendar is already open." },
+        bestPractice: "Use this tool instead of guessing day cells. For a range, select the start and end dates in the site's expected order."
+    },
+    browser_read_form: {
+        description: "Returns the current form state: fields, labels, types, required/disabled/read-only flags, safe values, select options, validation errors, missing_required, invalid_fields, and alerts. Credential values are redacted.",
+        params: { selector: "Optional form or field ID/CSS selector; otherwise the most comprehensive visible form is chosen." },
+        bestPractice: "Call before filling and again before submission. Use it instead of repeatedly reading the entire page."
+    },
+    browser_fill_form: {
+        description: "Fills up to 30 fields in one call, automatically handling text, native selects, checkboxes, and native date inputs. It produces one owner approval for the whole form when personal data is involved. Custom calendar widgets and autocomplete choices need their dedicated tools.",
+        params: { fields: "Array of {selector, value} entries, up to 30." },
+        fieldParams: { selector: "Field numeric ID or CSS selector.", value: "Text; option label for selects; 'true'/'false' for checkboxes; YYYY-MM-DD for native dates." },
+        bestPractice: "Read the form, bulk-fill ordinary fields, handle autocomplete and custom calendars separately, then read the form again before submitting."
+    },
+    browser_handle_dialog: {
+        description: "Preconfigures how the next JavaScript alert, confirm, or prompt will be answered. Dialogs block page execution, so the decision must be set before repeating the action that opens one.",
+        params: { accept: "Accept/OK when true; reject/Cancel when false. Default true.", text: "Optional text for a prompt dialog." },
+        bestPractice: "Use only when a prior response reported a dialog and the desired answer is known."
+    },
+    browser_toggle_overlay: {
+        description: "Shows or hides Vimium-style numeric labels over interactive elements on the phone screen.",
+        params: { enabled: "true to show labels; false to remove them." },
+        bestPractice: "The overlay is for visual orientation; use IDs from fresh Markdown for actual interaction."
+    },
+    browser_new_tab: {
+        description: "Opens a new tab in this AI connection's isolated browser profile.",
+        params: { url: "Optional initial URL; defaults to the browser home page." },
+        bestPractice: "Use a separate tab to preserve current work or when the owner has taken over another tab."
+    },
+    browser_close_tab: {
+        description: "Closes the specified tab or the active tab in this AI session.",
+        params: { tabId: "Optional tab ID; defaults to the active tab." },
+        bestPractice: "List tabs first when the active target is uncertain."
+    },
+    browser_list_tabs: {
+        description: "Lists all tabs belonging to this AI session, including IDs, titles, URLs, and active state.",
+        bestPractice: "Use returned tab IDs; tabs from other AI connections are never visible."
+    },
+    browser_switch_tab: {
+        description: "Switches this AI session to the specified tab.",
+        params: { tabId: "Tab ID returned by browser_list_tabs." },
+        bestPractice: "Read the page after switching before using element IDs."
+    },
+    browser_list_shortcuts: {
+        description: "Lists optional operator-curated sites grouped by category, with descriptions of suitable tasks. A relevant shortcut often reduces page reads, interactions, and token use. Recommendations are optional; the AI may use any site.",
+        bestPractice: "At the start of a shopping, travel, booking, or other supported task, check for a relevant shortcut. If selected, preserve it by calling browser_open_shortcut with shortcutId."
+    },
+    browser_open_shortcut: {
+        description: "Opens an operator-curated site selected by the AI from browser_list_shortcuts. The phone resolves shortcutId so the stored URL and affiliate parameters remain unchanged. It never selects a site automatically.",
+        params: { shortcutId: "Stable ID from browser_list_shortcuts.", read: "When true, include Markdown in the response.", offset: "Markdown character offset when read=true.", tabId: "Optional target tab." },
+        bestPractice: "Do not copy, search for, or rewrite the shortcut URL; pass shortcutId directly."
+    },
+    browser_get_session_info: {
+        description: "Returns this AI connection's session identity, permissions, view mode, tab count, and tabs currently held by the owner. It never exposes another client's profile.",
+        bestPractice: "Check permissions before a complex workflow and use heldByUser to understand why a tab rejects commands."
+    },
+    browser_list_sessions: {
+        description: "Returns only this AI connection's isolated session. Cross-client session discovery and profile switching are intentionally unavailable.",
+        bestPractice: "Do not attempt to find or switch to another AI client's session."
+    },
+    browser_clear_session_data: {
+        description: "Clears cookies, cache, and/or browsing history only for this AI connection's isolated profile. clear_data permission is disabled by default and the owner must approve the destructive action.",
+        params: { clearCookies: "Clear cookies; default true.", clearCache: "Clear cache; default true.", clearHistory: "Clear browsing history; default true." },
+        bestPractice: "Warn that sign-ins may be lost and never retry after denial without first speaking to the owner."
+    }
+};
+
+for (const tool of TOOLS) {
+    const copy = AI_TOOL_COPY[tool.name];
+    if (!copy) throw new Error(`Missing English AI copy for ${tool.name}`);
+    tool.description = copy.description;
+    const properties = tool.inputSchema?.properties || {};
+    for (const [name, description] of Object.entries(copy.params || {})) {
+        if (properties[name]) properties[name].description = description;
+    }
+    if (properties.deviceId) properties.deviceId.description = "Optional target Android device ID returned by browser_list_devices.";
+    if (properties.fields?.items?.properties && copy.fieldParams) {
+        for (const [name, description] of Object.entries(copy.fieldParams)) {
+            if (properties.fields.items.properties[name]) properties.fields.items.properties[name].description = description;
+        }
+    }
+}
+
 // Comprehensive Tool Documentation & Agent Playbooks Dictionary
 for (const tool of TOOLS) {
     tool.inputSchema.properties.operationId = {
         type: 'string', pattern: '^[A-Za-z0-9_-]{8,80}$',
-        description: 'Yan etkili işlemlerde çağrıdan önce seçilen sabit işlem kimliği. Aynı anahtar ve parametrelerle 5 dakika içinde tekrar gönderim ikinci işlem başlatmaz. Röle yeniden başlarsa bu bellek kaydı kaybolur; belirsiz sonuçlarda önce sayfanın durumunu kontrol edin.'
+        description: 'Stable idempotency key chosen before a side-effecting call. Repeating the same tool, target, and arguments with the same key within five minutes does not start a second action. This memory is lost when the relay restarts; after an uncertain outcome, inspect page state before retrying.'
     };
 }
 const TOOL_DOCUMENTATION = {
@@ -1110,34 +1281,196 @@ const TOOL_DOCUMENTATION = {
     ]
 };
 
+function documentedParameters(tool) {
+    const required = new Set(tool.inputSchema?.required || []);
+    return Object.fromEntries(Object.entries(tool.inputSchema?.properties || {}).map(([name, schema]) => {
+        const item = {
+            type: schema.type || 'string',
+            required: required.has(name),
+            description: schema.description || ''
+        };
+        if (schema.enum) item.allowed_values = schema.enum;
+        if (schema.minimum !== undefined) item.minimum = schema.minimum;
+        if (schema.maximum !== undefined) item.maximum = schema.maximum;
+        if (schema.pattern) item.pattern = schema.pattern;
+        if (schema.items?.properties) {
+            const itemRequired = new Set(schema.items.required || []);
+            item.item_fields = Object.fromEntries(Object.entries(schema.items.properties).map(([childName, child]) => [childName, {
+                type: child.type || 'string',
+                required: itemRequired.has(childName),
+                description: child.description || ''
+            }]));
+        }
+        return [name, item];
+    }));
+}
+
+const ENGLISH_TOOL_CATEGORIES = {
+    navigation: {
+        name: 'Navigation, search, and recommended sites',
+        tools: ['browser_navigate', 'browser_reload', 'browser_search', 'browser_scroll', 'browser_list_shortcuts', 'browser_open_shortcut']
+    },
+    interaction: {
+        name: 'Interaction, forms, and page controls',
+        tools: ['browser_click', 'browser_click_at', 'browser_type', 'browser_select_option', 'browser_pick_date', 'browser_read_form', 'browser_fill_form', 'browser_press_key', 'browser_wait_for', 'browser_handle_dialog', 'browser_toggle_overlay', 'browser_execute_js']
+    },
+    content_extraction: {
+        name: 'Page reading and visual inspection',
+        tools: ['browser_get_markdown', 'browser_get_html', 'browser_screenshot']
+    },
+    tabs_and_sessions: {
+        name: 'Tabs, devices, and isolated session state',
+        tools: ['browser_new_tab', 'browser_close_tab', 'browser_list_tabs', 'browser_switch_tab', 'browser_get_session_info', 'browser_list_sessions', 'browser_clear_session_data']
+    },
+    meta: {
+        name: 'Documentation and routing',
+        tools: ['browser_get_tool_documentation', 'browser_list_devices']
+    }
+};
+
+const ENGLISH_EXAMPLE_CALLS = {
+    browser_get_tool_documentation: { tool_name: 'all', category: 'all' },
+    browser_navigate: { url: 'https://example.com', read: true },
+    browser_search: { query: 'best train route from city A to city B', read: true },
+    browser_get_markdown: { offset: 0 },
+    browser_click: { selector: '12', operationId: 'click-result-12' },
+    browser_screenshot: { grid: true },
+    browser_click_at: { screenshot_id: 'shot_abc123', cell: 'H12', x_ratio: 0.6, y_ratio: 0.5 },
+    browser_type: { selector: '5', text: 'London', keystroke: true },
+    browser_select_option: { selector: '9', label: 'United Kingdom' },
+    browser_pick_date: { selector: '14', date: '2026-10-20' },
+    browser_read_form: {},
+    browser_fill_form: { fields: [{ selector: '5', value: 'Alex' }, { selector: '6', value: 'alex@example.com' }] },
+    browser_wait_for: { text: 'Results', timeout_ms: 10000 },
+    browser_handle_dialog: { accept: true },
+    browser_list_shortcuts: {},
+    browser_open_shortcut: { shortcutId: 'shortcut_example', read: true },
+    browser_new_tab: { url: 'https://example.com' },
+    browser_clear_session_data: { clearCookies: true, clearCache: true, clearHistory: false }
+};
+
+const ENGLISH_BROWSER_PLAYBOOKS = [
+    {
+        title: 'Core browser workflow',
+        steps: [
+            'Choose the target device with browser_list_devices when more than one device is available.',
+            'For supported shopping, travel, booking, or other catalogued tasks, check browser_list_shortcuts before searching. Recommendations are optional, but a relevant shortcut usually reduces page reads, interactions, and token use.',
+            'If you select a shortcut, call browser_open_shortcut with its shortcutId. Do not copy, rewrite, strip, or search for its URL; this preserves the exact operator-curated destination and affiliate parameters.',
+            'Otherwise use browser_navigate for a known URL or browser_search for discovery. Set read=true only when the content is immediately needed.',
+            'Use browser_get_markdown as the normal page-reading tool. Treat its numeric IDs as a snapshot: navigation and major DOM changes invalidate them.',
+            'Prefer DOM interactions. Use browser_screenshot(grid=true) and browser_click_at only when a canvas, map, cross-origin frame, or visual-only control has no usable DOM target.',
+            'After any side-effecting or uncertain action, inspect the page before retrying. Repeating a submit, purchase, booking, or message action can duplicate it.'
+        ]
+    },
+    {
+        title: 'Forms and booking flows',
+        steps: [
+            'Read the page once with browser_get_markdown to obtain current element IDs and detect consent walls, sign-in requirements, and form boundaries.',
+            'If a consent wall blocks the page, prefer the least-data option (reject or necessary-only) unless the user explicitly asked otherwise. Do not accept optional tracking merely to continue faster.',
+            'Call browser_read_form before filling. Use its fields, required flags, options, missing_required, invalid_fields, and alerts instead of guessing from labels.',
+            'Use browser_fill_form for ordinary text fields, native selects, checkboxes, and native date inputs. It is faster and produces one approval for a form containing personal data.',
+            'Use browser_select_option for native <select> elements. Never click a native select: Android may open a system picker outside the page that the agent cannot operate.',
+            'Use browser_pick_date with YYYY-MM-DD for native date inputs and supported calendar widgets. Do not guess day cells or months from a screenshot.',
+            'Handle autocomplete fields separately with browser_type. If suggestions appear, choose the intended suggestion by its fresh ID or with ArrowDown + Enter; visible typed text may not set the widget value.',
+            'Credential fields (password, OTP, payment) require sensitive_fields permission and can require fresh owner approval. Never claim success when permission or approval was denied.',
+            'Call browser_read_form again before submission. Submit only when required fields are complete, validation errors are resolved, and the requested irreversible action is authorized by the user.',
+            'After submission, wait for a meaningful result with browser_wait_for, then inspect alerts, invalid_fields, the final URL, and page content. Do not press Submit again merely because loading is slow.'
+        ]
+    },
+    {
+        title: 'CAPTCHA, bot checks, and human verification',
+        steps: [
+            'If a response reports captcha, human verification, a challenge page, or suspicious-traffic blocking, stop automated interaction with that challenge.',
+            'Do not solve, bypass, click through, script, refresh-loop, or use coordinate tapping against a CAPTCHA. Repeated attempts can strengthen the block or invalidate the session.',
+            'Tell the user that human verification is required and ask them to complete it on the phone. The owner may take over the tab; while heldByUser contains that tab, no AI command may inspect or modify it.',
+            'After the user releases the tab, read the page again and continue only if the challenge is gone. Treat content captured from an active challenge page as incomplete or unreliable.',
+            'If the site continues to block access, use a legitimate alternative source or explain that the task cannot continue on that site.'
+        ]
+    },
+    {
+        title: 'Dynamic pages, dialogs, and recovery',
+        steps: [
+            'Use browser_wait_for after actions that start asynchronous loading. A timeout means the expected state did not appear; read the page and change strategy instead of waiting in a loop.',
+            'If a response reports a JavaScript dialog, call browser_handle_dialog before repeating the action that opens it. Dialogs block page execution while open.',
+            'If page_changed is false, do not repeat the same click blindly. Refresh the interaction map and inspect validation messages, disabled state, overlays, or a newly opened suggestion list.',
+            'If command_outcome_unknown or a network interruption follows a side effect, inspect current page/form state first. Use a stable operationId for retryable side-effecting calls.',
+            'If the owner has taken over a tab, work in a new tab or wait for release. Never try to evade takeover isolation.'
+        ]
+    },
+    {
+        title: 'Privacy, permissions, and destructive actions',
+        steps: [
+            'This AI connection is pinned to its own cookie profile. It cannot discover or switch to another client profile.',
+            'Respect permission errors. Ask the owner to enable the named permission in the Android app; do not seek an alternate tool to bypass it.',
+            'Personal-data and credential entry may display an owner approval prompt. Silence or a 30-second timeout is a denial, not permission to retry repeatedly.',
+            'Before clearing session data, explain that cookies and sign-ins may be lost. browser_clear_session_data is destructive and always owner-controlled.',
+            'Do not expose secrets in URLs, logs, summaries, or success messages. Credential values are intentionally redacted from page and form reads.'
+        ]
+    }
+];
+
+const ENGLISH_TOOL_DOCUMENTATION = {
+    overview: {
+        title: 'Android Browser MCP — Agent Operating Guide',
+        description: 'A real Android WebView browser controlled through MCP. The phone is the authority for identity, permissions, approvals, isolated profiles, and page access; the relay only routes commands.',
+        recommended_first_steps: [
+            'Call browser_get_session_info to understand permissions and tabs held by the owner.',
+            'Call browser_list_devices when more than one authorized phone may be available.',
+            'Call browser_list_shortcuts before a search when a curated destination may match the task.',
+            'Use browser_get_markdown for the first interaction map after opening a page.'
+        ],
+        reading_strategy: 'Use Markdown for normal reading and element IDs, browser_read_form for focused form state, HTML only for missing DOM attributes, and screenshots only for genuinely visual targets.',
+        operation_safety: 'Choose a stable operationId before a side-effecting call. On an unknown outcome, inspect the page before retrying. Never duplicate a submission, purchase, reservation, message, or deletion simply because the response was delayed.',
+        captcha_policy: 'CAPTCHA and human-verification challenges must be completed by the user on the phone. Do not bypass, automate, coordinate-click, script, or refresh-loop a challenge.',
+        shortcut_policy: 'Recommended shortcuts are optional. When one fits, opening it by shortcutId is usually more efficient and preserves the exact curated URL. The AI remains free to use another site.',
+        form_policy: 'Read the form, fill ordinary fields in a batch, use dedicated select/date/autocomplete tools, validate again, and only then submit. Sensitive fields remain permission- and approval-gated.',
+        approval_policy: 'Approval timeout or denial means stop and explain what is needed. Do not spam repeated prompts.',
+        takeover_policy: 'A tab held by the owner is inaccessible to the AI in both directions. Continue in another tab or wait until the owner releases it.'
+    },
+    categories: ENGLISH_TOOL_CATEGORIES,
+    tools: Object.fromEntries(TOOLS.map((tool) => {
+        const category = Object.entries(ENGLISH_TOOL_CATEGORIES).find(([, value]) => value.tools.includes(tool.name))?.[0] || 'meta';
+        const copy = AI_TOOL_COPY[tool.name];
+        return [tool.name, {
+            name: tool.name,
+            category,
+            summary: copy.description,
+            parameters: documentedParameters(tool),
+            best_practice: copy.bestPractice,
+            ...(ENGLISH_EXAMPLE_CALLS[tool.name] ? { example_call: ENGLISH_EXAMPLE_CALLS[tool.name] } : {})
+        }];
+    })),
+    playbooks: ENGLISH_BROWSER_PLAYBOOKS
+};
+
 function generateDocumentationResponse(toolName = 'all', category = 'all') {
     const cleanTool = (toolName || 'all').trim().toLowerCase();
     const cleanCat = (category || 'all').trim().toLowerCase();
 
-    if (cleanTool !== 'all' && TOOL_DOCUMENTATION.tools[cleanTool]) {
-        const doc = TOOL_DOCUMENTATION.tools[cleanTool];
+    if (cleanTool !== 'all' && ENGLISH_TOOL_DOCUMENTATION.tools[cleanTool]) {
+        const doc = ENGLISH_TOOL_DOCUMENTATION.tools[cleanTool];
         return {
             status: "success",
             requested_tool: cleanTool,
             documentation: doc,
-            meta_info: "Tüm araçların ve iş akışlarının tam listesini görmek için tool_name: 'all' parametresi ile çağırabilirsiniz.",
-            formatted_text: `### 🛠️ Araç Rehberi: ${doc.name}\n- **Kategori:** ${doc.category}\n- **Özet:** ${doc.summary}\n- **Parametreler:**\n${Object.entries(doc.parameters).map(([k, v]) => `  - \`${k}\`: ${v}`).join('\n')}\n- **En İyi Kullanım (Best Practice):** ${doc.best_practice}\n${doc.example_call ? `- **Örnek Çağrı:** \`${JSON.stringify(doc.example_call)}\`\n` : ''}`
+            meta_info: "Call with tool_name: 'all' to receive the complete browser operating guide and playbooks.",
+            formatted_text: `### Tool guide: ${doc.name}\n- **Category:** ${doc.category}\n- **Summary:** ${doc.summary}\n- **Parameters:**\n${Object.entries(doc.parameters).map(([k, v]) => `  - \`${k}\` (${v.type}${v.required ? ', required' : ', optional'}): ${v.description}`).join('\n')}\n- **Best practice:** ${doc.best_practice}\n${doc.example_call ? `- **Example call:** \`${JSON.stringify(doc.example_call)}\`\n` : ''}`
         };
     }
 
-    let filteredTools = Object.values(TOOL_DOCUMENTATION.tools);
+    let filteredTools = Object.values(ENGLISH_TOOL_DOCUMENTATION.tools);
     if (cleanCat !== 'all') {
         filteredTools = filteredTools.filter(t => t.category === cleanCat);
     }
 
     return {
         status: "success",
-        overview: TOOL_DOCUMENTATION.overview,
+        overview: ENGLISH_TOOL_DOCUMENTATION.overview,
         category_filter: cleanCat,
         total_tools: filteredTools.length,
         tools: filteredTools,
-        playbooks: TOOL_DOCUMENTATION.playbooks,
-        quick_tip: "Herhangi bir aracın spesifik detayını almak için: browser_get_tool_documentation(tool_name: 'araç_adı') çağırabilirsiniz."
+        playbooks: ENGLISH_TOOL_DOCUMENTATION.playbooks,
+        quick_tip: "For focused help, call browser_get_tool_documentation with tool_name set to a specific tool."
     };
 }
 
@@ -1204,7 +1537,7 @@ function requireAuth(req, res) {
             res.setHeader('Retry-After', String(gate.retryAfterSeconds));
             res.status(429).json({
                 error: 'too_many_attempts',
-                message: `Çok fazla başarısız kimlik denemesi. ${gate.retryAfterSeconds} saniye sonra tekrar deneyin.`
+                message: `Too many failed authentication attempts. Try again in ${gate.retryAfterSeconds} seconds.`
             });
             return null;
         }
@@ -1215,7 +1548,7 @@ function requireAuth(req, res) {
         setChallengeHeader(req, res);
         res.status(401).json({
             error: 'unauthorized',
-            message: "Geçerli bir istemci kimliği gerekli. İki yol var: (1) MCP istemciniz OAuth destekliyorsa bağlantıyı başlatın, tarayıcıda açılan sayfaya telefondaki bağlantı kodunu yazın; (2) ya da Android uygulamasında Ayarlar → MCP → 'AI istemcisi ekle' ile bir anahtar üretip 'Authorization: Bearer <clientId>.<secret>' başlığını elle ekleyin."
+            message: "A valid client credential is required. Either start the MCP client's OAuth flow and enter the pairing code shown on the phone, or create an AI connection in the Android app and send its key as 'Authorization: Bearer <clientId>.<secret>'."
         });
         return null;
     }
@@ -1223,7 +1556,7 @@ function requireAuth(req, res) {
     if (auth.account && auth.account.status !== 'active') {
         res.status(403).json({
             error: 'account_suspended',
-            message: 'Bu istemcinin bağlı olduğu hesap askıya alınmış. Panelden durumu kontrol edin.'
+            message: 'The account associated with this client is suspended. Ask the owner or operator to review its status.'
         });
         return null;
     }
@@ -1267,7 +1600,7 @@ async function enforceQuota(auth, refuse) {
 
     if (usage.commandCount > plan.commandsPerDay) {
         const resetsIn = Math.ceil((window + 86400000 - Date.now()) / 60000);
-        refuse(`quota_exceeded: günlük komut kotanız doldu (${plan.commandsPerDay}). Kota ${resetsIn} dakika içinde sıfırlanır. Bu geçici bir sınırdır ve tekrar denemek işe yaramaz — kullanıcıya durumu bildirin.`);
+        refuse(`quota_exceeded: the daily command quota (${plan.commandsPerDay}) is exhausted. It resets in about ${resetsIn} minutes. Retrying will not help; inform the user.`);
         return false;
     }
     return true;
@@ -1300,15 +1633,15 @@ function deviceChoiceLabel(deviceId) {
 function selectBoundDevice(record, requestedDeviceId = null) {
     const allowed = boundDeviceIds(record);
     if (allowed.length === 0) {
-        throw new Error('Bu AI bağlantısına bağlı cihaz yok. Android uygulamasında bağlantıyı bir cihaza ekleyin.');
+        throw new Error('No device is bound to this AI connection. Add the connection to a device in the Android app.');
     }
 
     if (requestedDeviceId) {
         if (!allowed.includes(requestedDeviceId)) {
-            throw new Error(`Cihaz '${requestedDeviceId}' bu AI bağlantısı için yetkili değil. Kullanılabilir cihazlar: ${allowed.map(deviceChoiceLabel).join(', ')}.`);
+            throw new Error(`Device '${requestedDeviceId}' is not authorized for this AI connection. Available devices: ${allowed.map(deviceChoiceLabel).join(', ')}.`);
         }
         if (!onlineBrowser(requestedDeviceId)) {
-            throw new Error(`Seçilen cihaz (${deviceChoiceLabel(requestedDeviceId)}) çevrimdışı. Android uygulamasını açıp köprü bağlantısını etkinleştirin; tekrar denemek tek başına yardımcı olmaz.`);
+            throw new Error(`The selected device (${deviceChoiceLabel(requestedDeviceId)}) is offline. Ask the owner to open the Android app and enable the bridge connection; retrying alone will not help.`);
         }
         return requestedDeviceId;
     }
@@ -1322,14 +1655,14 @@ function selectBoundDevice(record, requestedDeviceId = null) {
     if (accountDefaultDeviceId) {
         if (!allowed.includes(accountDefaultDeviceId)) {
             throw new Error(
-                `Ana cihaz (${deviceChoiceLabel(accountDefaultDeviceId)}) bu AI oturumuna bağlı değil. ` +
-                'Android uygulamasında oturum senkronizasyonunu açın veya bu oturumun bulunduğu telefonu ana cihaz yapın.'
+                `The main device (${deviceChoiceLabel(accountDefaultDeviceId)}) is not bound to this AI session. ` +
+                'Enable session sync in the Android app or make the phone containing this session the main device.'
             );
         }
         if (!onlineBrowser(accountDefaultDeviceId)) {
             throw new Error(
-                `Ana cihaz (${deviceChoiceLabel(accountDefaultDeviceId)}) çevrimdışı. ` +
-                'Android uygulamasında çevrimiçi bir telefonu “Ana cihaz” olarak seçin.'
+                `The main device (${deviceChoiceLabel(accountDefaultDeviceId)}) is offline. ` +
+                'Select an online phone as the main device in the Android app.'
             );
         }
         return accountDefaultDeviceId;
@@ -1343,12 +1676,12 @@ function selectBoundDevice(record, requestedDeviceId = null) {
 
     const online = allowed.filter((id) => !!onlineBrowser(id));
     if (allowed.length === 1 || online.length === 0) {
-        throw new Error(`Eşleştirilmiş cihaz (${allowed.map(deviceChoiceLabel).join(', ')}) şu anda çevrimdışı. Android uygulamasının açık ve köprüye bağlı olduğundan emin olun.`);
+        throw new Error(`The paired device (${allowed.map(deviceChoiceLabel).join(', ')}) is offline. Ask the owner to open the Android app and connect it to the bridge.`);
     }
 
     // Never silently fail over to another phone. Routing is allowed to choose
     // where a command goes, but that choice must remain visible to the owner.
-    throw new Error(`Varsayılan cihaz çevrimdışı. Çevrimiçi yetkili cihazlardan birini deviceId ile seçin: ${online.map(deviceChoiceLabel).join(', ')}.`);
+    throw new Error(`The default device is offline. Select one of these online authorized devices with deviceId: ${online.map(deviceChoiceLabel).join(', ')}.`);
 }
 
 function routeCommandToBrowser(type, args, clientId, clientSecret, requestedDeviceId = null) {
@@ -1367,7 +1700,7 @@ function routeCommandToBrowser(type, args, clientId, clientSecret, requestedDevi
 function dispatchCommandToBrowser(type, args, clientId, clientSecret, requestedDeviceId, operationId = null) {
     return new Promise((resolve, reject) => {
         const record = clients.get(clientId);
-        if (!record) return reject(new Error('İstemci kaydı bulunamadı. Lütfen cihazdan yeniden eşleştirin.'));
+        if (!record) return reject(new Error('The client record was not found. Pair the AI connection again from the device.'));
 
         let deviceId;
         try {
@@ -1376,7 +1709,7 @@ function dispatchCommandToBrowser(type, args, clientId, clientSecret, requestedD
             return reject(e);
         }
         const ws = onlineBrowser(deviceId);
-        if (!ws) return reject(new Error(`Seçilen cihaz (${deviceChoiceLabel(deviceId)}) bağlantı kurulmadan hemen önce çevrimdışı oldu.`));
+        if (!ws) return reject(new Error(`The selected device (${deviceChoiceLabel(deviceId)}) went offline before the command could be sent.`));
 
         const messageId = randomUUID();
         const payload = JSON.stringify({
@@ -1392,8 +1725,8 @@ function dispatchCommandToBrowser(type, args, clientId, clientSecret, requestedD
         const timeout = setTimeout(() => {
             pendingRequests.delete(messageId);
             if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'cancel_command', messageId, clientId, clientSecret }), () => {});
-            reject(new Error('command_outcome_unknown: cihaz yanıtı zaman aşımına uğradı. İşlem gerçekleşmiş olabilir; aynı yan etkili işlemi körlemesine tekrarlamayın. ' +
-                (operationId ? `Aynı operationId (${operationId}) ile yeniden gönderim ikinci bir işlem başlatmaz; sayfanın durumunu kontrol edin.` : 'Sayfanın durumunu kontrol edin; sonraki yan etkili işlemlerde sabit bir operationId kullanın.')));
+            reject(new Error('command_outcome_unknown: The device response timed out. The action may have completed; do not blindly repeat a side-effecting command. ' +
+                (operationId ? `Retrying with the same operationId (${operationId}) will not start a second action; inspect the page state first.` : 'Inspect the page state first, and use a stable operationId for future side-effecting commands.')));
         }, COMMAND_TIMEOUT_MS);
 
         pendingRequests.set(messageId, {
@@ -1413,7 +1746,7 @@ function dispatchCommandToBrowser(type, args, clientId, clientSecret, requestedD
             if (!error || !pendingRequests.has(messageId)) return;
             clearTimeout(timeout);
             pendingRequests.delete(messageId);
-            reject(new Error('command_outcome_unknown: cihaz bağlantısı kesildi. Sayfanın durumunu kontrol etmeden işlemi tekrarlamayın.'));
+            reject(new Error('command_outcome_unknown: The device disconnected. Do not repeat the command until you have inspected the current page state.'));
         });
         console.log(`[Bridge] '${type}' → client=${clientId} device=${deviceId} msg=${messageId}`);
     });
@@ -1819,7 +2152,7 @@ wss.on('connection', (ws, request) => {
             if (payload.status === 'success' || payload.success === true) {
                 pending.resolve(payload.data || {});
             } else {
-                pending.reject(new Error(payload.error || 'Cihaz işlem hatası'));
+                pending.reject(new Error(payload.error || 'The device could not complete the command.'));
             }
             return;
         }
@@ -1837,7 +2170,7 @@ wss.on('connection', (ws, request) => {
             if (pending.ws !== ws) continue;
             clearTimeout(pending.timeout);
             pendingRequests.delete(messageId);
-            pending.reject(new Error('command_outcome_unknown: cihaz bağlantısı kesildi. İşlem gerçekleşmiş olabilir; sayfanın durumunu kontrol etmeden işlemi tekrarlamayın.'));
+            pending.reject(new Error('command_outcome_unknown: The device disconnected. The action may have completed; inspect the current page state before retrying.'));
         }
         if (deviceId && browsers.get(deviceId) === ws) {
             browsers.delete(deviceId);
@@ -1893,8 +2226,8 @@ app.get('/sse', (req, res) => {
         return res.status(429).json({
             error: 'too_many_channels',
             message: openForClient >= plan.maxSseChannelsPerClient
-                ? `Bu anahtar için aynı anda en fazla ${plan.maxSseChannelsPerClient} kanal açılabilir. Kullanılmayan MCP istemcilerini kapatın.`
-                : 'Sunucu eşzamanlı bağlantı sınırına ulaştı. Kısa süre sonra tekrar deneyin.'
+                            ? `This key may open at most ${plan.maxSseChannelsPerClient} concurrent channels. Close unused MCP clients.`
+                            : 'The server has reached its concurrent connection limit. Try again shortly.'
         });
     }
 
@@ -2112,7 +2445,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
                 recordToolUsage(auth, toolName, 'error', Date.now() - toolStartedAt);
                 reply({
                     isError: true,
-                    content: [{ type: "text", text: "Oturum değiştirme kaldırıldı. Her istemci kendi izole profiline sabitlenmiştir; profil seçimi yalnızca cihaz sahibinin kararıdır." }]
+                        content: [{ type: "text", text: "Session switching is unavailable. Every client is pinned to its isolated profile; only the device owner controls profile assignment." }]
                 });
                 return 'handled';
             default:
@@ -2121,7 +2454,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
                 return 'handled';
         }
 
-        const clientName = ctx.clientName || 'AI istemcisi';
+            const clientName = ctx.clientName || 'AI client';
         const boundDeviceId = requestedDeviceId || auth.record.deviceId;
 
         if (!(await enforceQuota(auth, (message) => {
@@ -2176,7 +2509,7 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
             recordToolUsage(auth, toolName, 'error', Date.now() - toolStartedAt);
             reply({
                 isError: true,
-                content: [{ type: "text", text: `Hata: ${error.message}` }]
+                content: [{ type: "text", text: `Error: ${error.message}` }]
             });
         }
         return 'handled';
@@ -2200,17 +2533,17 @@ app.post('/message', async (req, res) => {
     const { sessionId } = req.query;
     const session = sessionId ? sseSessions.get(sessionId) : null;
     if (!session) {
-        return res.status(404).json({ error: 'unknown_session', message: 'Oturum bulunamadı. SSE kanalını yeniden açın.' });
+        return res.status(404).json({ error: 'unknown_session', message: 'Session not found. Open the SSE channel again.' });
     }
     // Holding a session id is not enough — the credential must own that session.
     if (session.clientId !== auth.clientId) {
-        return res.status(403).json({ error: 'session_mismatch', message: 'Bu oturum başka bir istemciye ait.' });
+        return res.status(403).json({ error: 'session_mismatch', message: 'This session belongs to another client.' });
     }
 
     const outcome = await dispatchJsonRpc(
         auth,
         {
-            clientName: session.clientName || 'AI istemcisi',
+        clientName: session.clientName || 'AI client',
             setClientInfo(info) { session.clientInfo = info; }
         },
         req.body,
@@ -2242,7 +2575,7 @@ app.post('/mcp', async (req, res) => {
     const outcome = await dispatchJsonRpc(
         auth,
         {
-            clientName: auth.record.name || 'AI istemcisi',
+        clientName: auth.record.name || 'AI client',
             // Nothing to remember: the reported name is cosmetic and identity
             // never comes from it.
             setClientInfo() {}

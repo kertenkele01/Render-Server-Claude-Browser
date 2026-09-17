@@ -238,6 +238,11 @@ test('araç listesi ve araç çağrısı POST yanıtında döner', async () => {
     assert.ok(names.includes('browser_click_at'), 'koordinat tıklama aracı listelenmeli');
     assert.ok(names.includes('browser_select_option'), 'form araçları listelenmeli');
     assert.ok(names.includes('browser_pick_date'));
+    assert.doesNotMatch(
+        JSON.stringify(list.body.result.tools),
+        /[çğıöşüÇĞİÖŞÜ]/,
+        'AI-facing tool and parameter descriptions must be English'
+    );
 
     const call = await rpc({
         jsonrpc: '2.0',
@@ -270,6 +275,32 @@ test('araç listesi ve araç çağrısı POST yanıtında döner', async () => {
     });
     assert.equal(coordinateClick.status, 200);
     assert.equal(JSON.parse(coordinateClick.body.result.content[0].text).action, 'click_at');
+});
+
+test('browser documentation is an English operating guide with forms, shortcuts and CAPTCHA policy', async () => {
+    const response = await rpc({
+        jsonrpc: '2.0',
+        id: 33,
+        method: 'tools/call',
+        params: {
+            name: 'browser_get_tool_documentation',
+            arguments: { tool_name: 'all', category: 'all' }
+        }
+    });
+    assert.equal(response.status, 200);
+    const guide = JSON.parse(response.body.result.content[0].text);
+    assert.equal(guide.status, 'success');
+    assert.ok(guide.total_tools > 20);
+    assert.match(guide.overview.form_policy, /Read the form/i);
+    assert.match(guide.overview.shortcut_policy, /shortcutId/i);
+    assert.match(guide.overview.captcha_policy, /must be completed by the user/i);
+    assert.ok(guide.playbooks.some((entry) => /Forms and booking flows/i.test(entry.title)));
+    assert.ok(guide.playbooks.some((entry) => /CAPTCHA/i.test(entry.title)));
+    assert.doesNotMatch(
+        JSON.stringify(guide),
+        /[çğıöşüÇĞİÖŞÜ]/,
+        'the built-in browser guide must not expose Turkish system copy'
+    );
 });
 
 test('bilinmeyen araç JSON-RPC hatası döner', async () => {
