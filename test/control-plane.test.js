@@ -826,6 +826,33 @@ test('kısayol aracı röleden yönlendirilir', async () => {
     device.close();
 });
 
+test('misafir oturumu kalıcı anonim kimlik alır ve operatör logunda görünür', async () => {
+    const device = await connectDevice('dev_misafir', 'misafir-cihaz-sirri-16');
+    const started = await appApi(device, 'POST', '/api/v1/guest', {});
+    assert.equal(started.status, 200);
+    assert.equal(started.body.linked, false);
+    assert.equal(started.body.guest, true);
+    assert.match(started.body.guestId, /^guest_[a-f0-9]{20}$/);
+
+    const refreshed = await appApi(device, 'GET', '/api/v1/account');
+    assert.equal(refreshed.body.guestId, started.body.guestId, 'misafir kimliği yenilemede değişti');
+
+    // Audit writes are deliberately detached from the request path.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const analytics = await visit(operator, '/admin/usage');
+    assert.equal(analytics.status, 200);
+    const html = await analytics.text();
+    assert.match(html, new RegExp(started.body.guestId));
+    assert.match(html, /Misafir oturumu başladı/);
+
+    const left = await appApi(device, 'POST', '/api/v1/guest/leave', {});
+    assert.equal(left.status, 200);
+    assert.equal(left.body.guest, false);
+    assert.equal(left.body.guestId, '');
+    device.close();
+});
+
 test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async () => {
     const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
     const device = await connectDevice('dev_catalogue', 'cihaz-sirri-catalogue-16');

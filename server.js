@@ -243,9 +243,20 @@ function accountIdFor(clientId, deviceId) {
     return null;
 }
 
+/** Stable, non-secret support identity for an explicitly selected guest. */
+function guestIdFor(clientId, deviceId) {
+    if (clientId) {
+        const c = clients.get(clientId);
+        if (c && c.deviceId && (!deviceId || !devices.has(deviceId))) deviceId = c.deviceId;
+    }
+    const device = deviceId && devices.get(deviceId);
+    return device && !device.accountId ? (device.guestId || null) : null;
+}
+
 function addLog(clientId, clientName, deviceId, action, status, detail, host = null) {
     const event = {
         accountId: accountIdFor(clientId, deviceId),
+        guestId: guestIdFor(clientId, deviceId),
         deviceId: deviceId ? String(deviceId).substring(0, 64) : null,
         clientId: clientId ? String(clientId).substring(0, 64) : null,
         action: String(action || '').substring(0, 80),
@@ -255,9 +266,10 @@ function addLog(clientId, clientName, deviceId, action, status, detail, host = n
         createdAt: Date.now()
     };
 
-    // An event with no account has nobody to show it to. It is still worth a
-    // console line — this is how an unclaimed device announces itself.
-    if (!event.accountId) {
+    // A legacy unclaimed device has no durable owner-facing identity. An
+    // explicit guest does: its random guest id lets support correlate events
+    // without using an email address or exposing the device credential.
+    if (!event.accountId && !event.guestId) {
         console.log(`[Audit] (sahipsiz) ${event.action} · ${event.status} · ${event.deviceId || '-'}`);
         return;
     }
@@ -1583,7 +1595,16 @@ function requireAuth(req, res) {
  */
 async function enforceQuota(auth, refuse) {
     const accountId = auth.record && auth.record.accountId;
-    if (!accountId) return true;
+    if (!accountId) {
+        const origin = devices.get(auth?.record?.deviceId);
+        if (!origin?.guestId) return true;
+        const guestUsage = limits.hit('guestCommand', origin.guestId);
+        if (!guestUsage.allowed) {
+            refuse(`quota_exceeded: the guest daily command quota (${limits.WINDOWS.guestCommand.max}) is exhausted. It resets in about ${Math.ceil(guestUsage.retryAfterSeconds / 60)} minutes. Retrying will not help; inform the user.`);
+            return false;
+        }
+        return true;
+    }
 
     const plan = limits.planFor(auth.account);
     const window = limits.currentUsageWindow();
@@ -1932,6 +1953,7 @@ wss.on('connection', (ws, request) => {
                 deviceId: id,
                 status: 'success',
                 claimed: !!(record && record.accountId),
+                guestId: record?.guestId || null,
                 maxResponseBytes: MAX_DEVICE_RESPONSE_BYTES,
                 backupManagementVersion: 1,
                 catalog: await activeQuickLinkCatalogue()
@@ -3381,7 +3403,29 @@ function requireDevice(req, res) {
 async function accountSnapshot(device) {
     const account = device.accountId ? await store.getAccountById(device.accountId) : null;
     if (!account) {
-        return { linked: false, deviceId: device.id, deviceName: device.name };
+        const guest = !!device.guestId;
+        const plan = limits.planFor(null);
+        const guestUsage = guest ? limits.hit('guestCommand', device.guestId, { peek: true }) : null;
+        const guestCommandLimit = limits.WINDOWS.guestCommand.max;
+        return {
+            linked: false,
+            guest,
+            guestId: guest ? device.guestId : '',
+            deviceId: device.id,
+            deviceName: device.name,
+            plan: guest ? { id: 'guest', label: 'Misafir' } : undefined,
+            quota: guest ? {
+                commandsUsed: guestUsage ? guestCommandLimit - guestUsage.remaining : 0,
+                commandsPerDay: guestCommandLimit,
+                maxDevices: 1,
+                maxClients: plan.maxClients,
+                auditRetentionDays: plan.auditRetentionDays
+            } : undefined,
+            counts: guest ? {
+                devices: 1,
+                clients: [...clients.values()].filter((client) => boundDeviceIds(client).includes(device.id)).length
+            } : undefined
+        };
     }
     const plan = limits.planFor(account);
     const [usage, deviceCount, clientCount] = await Promise.all([
@@ -3419,11 +3463,52 @@ async function accountSnapshot(device) {
 
 /** Attaches this device to an account, and its clients with it. */
 async function linkDeviceToAccount(device, account) {
+    if (device.guestId) await store.setDeviceGuestId(device.id, null);
     await store.setDeviceAccount(device.id, account.id);
     // Signing in must never silently promote a backup into the cloud writer.
     await refreshRegistryCache();
     addLog(null, 'Uygulama', device.id, 'Cihaz Bağlandı', 'success', 'Cihaz hesaba bağlandı.');
 }
+
+/**
+ * Starts a local guest session. The random id is a support/audit label, not a
+ * credential: device authentication still uses deviceId.deviceSecret and MCP
+ * commands still require a client secret verified again by the phone.
+ */
+app.post('/api/v1/guest', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (device.accountId) {
+        return res.status(409).json({
+            error: 'account_already_linked',
+            message: 'Bu telefon zaten bir hesaba bağlı. Misafir moda geçmeden önce hesaptan çıkın.'
+        });
+    }
+
+    let guestId = device.guestId;
+    if (!guestId) {
+        // 80 random bits keeps the label short enough to read while making a
+        // collision or a useful guess unrealistic. It carries no user data.
+        guestId = `guest_${randomBytes(10).toString('hex')}`;
+        const updated = await store.setDeviceGuestId(device.id, guestId);
+        if (!updated) return res.status(409).json({ error: 'guest_start_failed', message: 'Misafir oturumu başlatılamadı.' });
+        await refreshRegistryCache();
+        addLog(null, 'Misafir', device.id, 'Misafir Oturumu Başladı', 'success', 'Yerel misafir profili etkinleştirildi.');
+    }
+    res.json(await accountSnapshot(devices.get(device.id) || device));
+});
+
+app.post('/api/v1/guest/leave', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (device.accountId) return res.status(409).json({ error: 'account_linked' });
+    if (device.guestId) {
+        addLog(null, 'Misafir', device.id, 'Misafir Oturumu Kapatıldı', 'info', 'Yerel veriler cihazda korundu.');
+        await store.setDeviceGuestId(device.id, null);
+        await refreshRegistryCache();
+    }
+    res.json(await accountSnapshot(devices.get(device.id) || device));
+});
 
 app.post('/api/v1/register', async (req, res) => {
     const device = requireDevice(req, res);
@@ -4535,6 +4620,8 @@ const ADMIN_CONNECTION_LOGS = new Map([
     ['Cihaz Bağlandı', 'Telefon bağlandı'],
     ['Cihaz Ayrıldı', 'Telefon bağlantısı kapandı'],
     ['Cihaz Bağı Koparıldı', 'Telefon hesap bağlantısı kapandı'],
+    ['Misafir Oturumu Başladı', 'Misafir oturumu başladı'],
+    ['Misafir Oturumu Kapatıldı', 'Misafir oturumu kapatıldı'],
     ['İstemci Eklendi', 'AI bağlantısı eklendi'],
     ['İstemci İptal Edildi', 'AI bağlantısı iptal edildi']
 ]);
