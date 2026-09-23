@@ -259,7 +259,7 @@ test('uygulamadan kayıt cihazı kendiliğinden bağlar', async () => {
     device.close();
 });
 
-test('uygulamadan giriş ikinci cihazı plan sınırına takar', async () => {
+test('cihaz sınırında giriş eski cihaza erişmeden seçimle tamamlanır', async () => {
     const first = await connectDevice('dev_giris_1', 'cihaz-sirri-16-karakter');
     await appSignUp(first, 'giris@test.com', 'cok-guclu-parola-2');
 
@@ -269,17 +269,36 @@ test('uygulamadan giriş ikinci cihazı plan sınırına takar', async () => {
     });
     assert.equal(denied.status, 409, 'ücretsiz plan ikinci cihazı kabul etti');
     assert.equal(denied.body.error, 'device_limit');
+    assert.ok(denied.body.replacementToken);
+    assert.deepEqual(denied.body.devices.map((d) => d.deviceId), ['dev_giris_1']);
+    assert.equal((await appApi(second, 'GET', '/api/v1/account')).body.linked, false);
 
-    // Freeing the first slot lets the second phone in.
-    await appApi(first, 'POST', '/api/v1/logout');
-    const ok = await appApi(second, 'POST', '/api/v1/login', {
-        email: 'giris@test.com', password: 'cok-guclu-parola-2'
+    const third = await connectDevice('dev_giris_3', 'cihaz-sirri-16-karakter');
+    const foreign = await appApi(third, 'POST', '/api/v1/login/replace-device', {
+        replacementToken: denied.body.replacementToken, targetDeviceId: 'dev_giris_1'
+    });
+    assert.equal(foreign.status, 401, 'devam kodu başka telefonda çalıştı');
+    assert.equal((await appApi(second, 'POST', '/api/v1/login/replace-device', {
+        replacementToken: denied.body.replacementToken, targetDeviceId: 'dev_giris_1', password: 'yanlis-parola'
+    })).status, 401, 'yanlış parola ile cihaz değiştirildi');
+    assert.equal((await appApi(second, 'POST', '/api/v1/login/replace-device', {
+        replacementToken: denied.body.replacementToken, targetDeviceId: 'dev_giris_3', password: 'cok-guclu-parola-2'
+    })).status, 404, 'başka hesaba ait olmayan cihaz seçilebildi');
+
+    const ok = await appApi(second, 'POST', '/api/v1/login/replace-device', {
+        replacementToken: denied.body.replacementToken, targetDeviceId: 'dev_giris_1', password: 'cok-guclu-parola-2'
     });
     assert.equal(ok.status, 200);
     assert.equal(ok.body.linked, true);
+    assert.equal(ok.body.counts.devices, 1);
+    assert.equal((await appApi(first, 'GET', '/api/v1/account')).body.linked, false);
+    assert.equal((await appApi(second, 'POST', '/api/v1/login/replace-device', {
+        replacementToken: denied.body.replacementToken, targetDeviceId: 'dev_giris_1'
+    })).status, 401, 'devam kodu tekrar kullanıldı');
 
     first.close();
     second.close();
+    third.close();
 });
 
 test('bir cihaz başka bir hesaba giriş yapamaz', async () => {

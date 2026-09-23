@@ -42,6 +42,18 @@ const { argumentsProblem, operationCache } = require('./lib/command-safety');
 const operations = operationCache();
 const management = require('./lib/device-management');
 const pendingRotations = new Map();
+// A password-verified, single-use continuation for a full device quota. It is
+// not an account session: it only permits replacing one owned device, is bound
+// to the requesting phone and disappears on restart or after five minutes.
+const pendingDeviceReplacements = new Map();
+const DEVICE_REPLACEMENT_TTL_MS = 5 * 60 * 1000;
+
+function pruneDeviceReplacements() {
+    const now = Date.now();
+    for (const [key, offer] of pendingDeviceReplacements) {
+        if (offer.expiresAt <= now) pendingDeviceReplacements.delete(key);
+    }
+}
 
 // ADMIN_TOKEN and ADMIN_PUBLIC are gone. They were a stand-in for "there is
 // one operator and it is me": a single shared token that unlocked a console
@@ -253,9 +265,9 @@ function guestIdFor(clientId, deviceId) {
     return device && !device.accountId ? (device.guestId || null) : null;
 }
 
-function addLog(clientId, clientName, deviceId, action, status, detail, host = null) {
+function addLog(clientId, clientName, deviceId, action, status, detail, host = null, explicitAccountId = null) {
     const event = {
-        accountId: accountIdFor(clientId, deviceId),
+        accountId: explicitAccountId || accountIdFor(clientId, deviceId),
         guestId: guestIdFor(clientId, deviceId),
         deviceId: deviceId ? String(deviceId).substring(0, 64) : null,
         clientId: clientId ? String(clientId).substring(0, 64) : null,
@@ -3597,14 +3609,80 @@ app.post('/api/v1/login', async (req, res) => {
     if (!device.accountId) {
         const owned = await store.countDevices(account.id);
         if (owned >= plan.maxDevices) {
+            pruneDeviceReplacements();
+            const token = randomBytes(32).toString('base64url');
+            const tokenHash = createHash('sha256').update(token).digest('hex');
+            // Bound the in-memory inventory even under repeated valid logins.
+            if (pendingDeviceReplacements.size >= 1000) pendingDeviceReplacements.delete(pendingDeviceReplacements.keys().next().value);
+            pendingDeviceReplacements.set(tokenHash, {
+                accountId: account.id, deviceId: device.id,
+                expiresAt: Date.now() + DEVICE_REPLACEMENT_TTL_MS
+            });
+            const ownedDevices = await store.listDevices(account.id);
+            res.setHeader('Cache-Control', 'no-store');
             return res.status(409).json({
                 error: 'device_limit',
-                message: `${plan.label} planı ${plan.maxDevices} cihazla sınırlı. Başka bir cihazın bağını koparıp tekrar deneyin.`
+                message: `${plan.label} planı ${plan.maxDevices} cihazla sınırlı. Devam etmek için bağlı cihazlardan birini seçin.`,
+                replacementToken: token,
+                expiresAt: Date.now() + DEVICE_REPLACEMENT_TTL_MS,
+                maxDevices: plan.maxDevices,
+                devices: ownedDevices.map((d) => ({
+                    deviceId: d.id, name: d.name, lastSeenAt: d.lastSeenAt || 0,
+                    online: browsers.has(d.id), isMain: account.defaultDeviceId === d.id
+                }))
             });
         }
         await linkDeviceToAccount(device, account);
     }
 
+    res.json(await accountSnapshot(devices.get(device.id)));
+});
+
+app.post('/api/v1/login/replace-device', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    const token = String(req.body?.replacementToken || '');
+    const targetId = String(req.body?.targetDeviceId || '');
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token) || !targetId || targetId === device.id) {
+        return res.status(400).json({ error: 'invalid_replacement', message: 'Cihaz seçimi geçersiz. Yeniden giriş yapın.' });
+    }
+    pruneDeviceReplacements();
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const pending = pendingDeviceReplacements.get(tokenHash);
+    if (!pending || pending.deviceId !== device.id || pending.expiresAt <= Date.now()) {
+        return res.status(401).json({ error: 'replacement_expired', message: 'Cihaz seçimi süresi doldu. Yeniden giriş yapın.' });
+    }
+    const account = await store.getAccountById(pending.accountId);
+    if (!account || account.status !== 'active' || device.accountId) {
+        pendingDeviceReplacements.delete(tokenHash);
+        return res.status(409).json({ error: 'replacement_unavailable', message: 'Hesap veya cihaz durumu değişti. Yeniden giriş yapın.' });
+    }
+    const passwordGate = limits.hit('login', `r:${device.id}`);
+    if (!passwordGate.allowed) {
+        res.setHeader('Retry-After', String(passwordGate.retryAfterSeconds));
+        return res.status(429).json({ error: 'too_many_attempts', message: `Çok fazla deneme. ${passwordGate.retryAfterSeconds} saniye sonra tekrar deneyin.` });
+    }
+    const password = String(req.body?.password || '');
+    if (!await accounts.verifyPassword(password, account.passwordHash, account.passwordSalt)) {
+        return res.status(401).json({ error: 'bad_credentials', message: 'Parola hatalı. Cihazı değiştirmeden önce yeniden deneyin.' });
+    }
+    limits.reset('login', `r:${device.id}`);
+    const target = await store.getDevice(targetId);
+    if (!target || target.accountId !== account.id) {
+        return res.status(404).json({ error: 'device_not_found', message: 'Seçilen cihaz artık bu hesaba bağlı değil. Yeniden giriş yapın.' });
+    }
+    // Consume before awaiting the transaction; concurrent taps cannot reuse it.
+    pendingDeviceReplacements.delete(tokenHash);
+    const changed = await store.replaceAccountDevice(account.id, targetId, device.id);
+    if (!changed) {
+        return res.status(409).json({ error: 'replacement_unavailable', message: 'Cihaz durumu değişti. Yeniden giriş yapın.' });
+    }
+    await refreshRegistryCache();
+    addLog(null, 'Uygulama', targetId, 'Cihaz Değiştirildi', 'warning', 'Hesap sahibi giriş sırasında eski cihazın bağını kaldırdı.', null, account.id);
+    addLog(null, 'Uygulama', device.id, 'Cihaz Bağlandı', 'success', 'Cihaz sınırında eski cihaz seçilerek hesaba bağlandı.');
+    const socket = browsers.get(targetId);
+    if (socket) try { socket.close(4403, 'Cihaz hesap sahibi tarafından kaldırıldı'); } catch (e) {}
+    res.setHeader('Cache-Control', 'no-store');
     res.json(await accountSnapshot(devices.get(device.id)));
 });
 
