@@ -872,6 +872,138 @@ test('misafir oturumu kalıcı anonim kimlik alır ve operatör logunda görün�
     device.close();
 });
 
+test('misafir cihaz kaydolunca mevcut AI bağlantısı korunur ve yalnızca seçilen eşitlemeyle yayımlanır', async () => {
+    const secret = 'misafir-yukseltme-ai-sirri-uzun';
+    const device = await connectDevice('dev_guest_upgrade', 'guest-upgrade-device-secret-16', [
+        { clientId: 'cli_guest_upgrade', secret, name: 'Misafir AI oturumu' }
+    ]);
+    const guest = await appApi(device, 'POST', '/api/v1/guest', {});
+    assert.equal(guest.status, 200);
+    assert.equal(guest.body.guest, true);
+
+    const registered = await appApi(device, 'POST', '/api/v1/register', {
+        email: 'guest-upgrade@test.com', password: 'misafir-guclu-parola-123'
+    });
+    assert.equal(registered.status, 201);
+    assert.equal(registered.body.linked, true);
+    assert.notEqual(registered.body.guest, true);
+    assert.ok(!registered.body.guestId);
+    assert.equal((await callTool(`cli_guest_upgrade.${secret}`)).status, 200,
+        'misafirden hesaba geçiş mevcut AI anahtarını bozmamalı');
+
+    const beforeChoice = await appApi(device, 'GET', '/api/v1/sync');
+    assert.equal(beforeChoice.status, 200);
+    assert.equal(beforeChoice.body.clients.length, 0, 'kayıt tek başına misafir oturumunu buluta yayımlamamalı');
+
+    const selected = await appApi(device, 'POST', '/api/v1/account/main-device', { deviceId: 'dev_guest_upgrade' });
+    assert.equal(selected.status, 200);
+    const mode = await appApi(device, 'POST', '/api/v1/sync/device-mode', {
+        sessionsEnabled: true, cookiesEnabled: false
+    });
+    assert.equal(mode.status, 200);
+    const ready = await appApi(device, 'POST', '/api/v1/account/main-device/ready', {
+        generation: selected.body.mainGeneration
+    });
+    assert.equal(ready.status, 200);
+    const afterChoice = await appApi(device, 'GET', '/api/v1/sync');
+    assert.equal(afterChoice.status, 200);
+    assert.ok(afterChoice.body.clients.some((client) => client.clientId === 'cli_guest_upgrade'));
+    device.close();
+});
+
+test('misafir cihaz mevcut hesaba cihaz sınırı üzerinden girince yerel AI bağlantısını korur', async () => {
+    const owner = await connectDevice('dev_guest_login_owner', 'guest-login-owner-secret-16');
+    await appSignUp(owner, 'guest-login@test.com', 'guclu-guest-login-parola-123');
+    const secret = 'guest-login-client-secret-123';
+    const guest = await connectDevice('dev_guest_login', 'guest-login-device-secret-16', [
+        { clientId: 'cli_guest_login', secret, name: 'Yerel misafir bağlantısı' }
+    ]);
+    assert.equal((await appApi(guest, 'POST', '/api/v1/guest', {})).status, 200);
+
+    const login = await appApi(guest, 'POST', '/api/v1/login', {
+        email: 'guest-login@test.com', password: 'guclu-guest-login-parola-123'
+    });
+    assert.equal(login.status, 409);
+    assert.equal(login.body.error, 'device_limit');
+    const replaced = await appApi(guest, 'POST', '/api/v1/login/replace-device', {
+        replacementToken: login.body.replacementToken,
+        targetDeviceId: 'dev_guest_login_owner',
+        password: 'guclu-guest-login-parola-123'
+    });
+    assert.equal(replaced.status, 200);
+    assert.equal(replaced.body.linked, true);
+    assert.equal((await callTool(`cli_guest_login.${secret}`)).status, 200);
+    const inventory = await appApi(guest, 'GET', '/api/v1/sync');
+    assert.equal(inventory.status, 200);
+    assert.equal(inventory.body.clients.length, 0, 'giriş tek başına misafir oturumunu buluta taşımamalı');
+    guest.close();
+    owner.close();
+});
+
+test('hesaba özel tek kurtarma kodu parolayı sıfırlar, yedek anahtarını korur ve tek kullanımlıdır', async () => {
+    const owner = await connectDevice('dev_recovery_owner', 'recovery-owner-secret-16');
+    const email = 'recovery-kit@test.com';
+    const oldPassword = 'eski-kurtarma-parolasi-123';
+    await appSignUp(owner, email, oldPassword);
+    const kitId = crypto.randomBytes(16).toString('base64url');
+    const codeHash = sha256('recovery-code-proof');
+    const recoveryEnvelope = {
+        iv: crypto.randomBytes(12).toString('base64url'),
+        ciphertext: crypto.randomBytes(48).toString('base64url')
+    };
+    const created = await appApi(owner, 'POST', '/api/v1/account/recovery-kit', {
+        password: oldPassword, kitId, codeHash, recoveryEnvelope, cookieKeyRevision: 0
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    assert.equal(JSON.stringify(created.body).includes(codeHash), false);
+
+    const nextPhone = await connectDevice('dev_recovery_new', 'recovery-new-secret-16');
+    const prepared = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/prepare', { email });
+    assert.equal(prepared.status, 200, JSON.stringify(prepared.body));
+    assert.equal(prepared.body.kitId, kitId);
+    assert.deepEqual(prepared.body.recoveryEnvelope, recoveryEnvelope);
+    assert.equal(JSON.stringify(prepared.body).includes(codeHash), false);
+    const absent = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/prepare',
+        { email: 'someone-else@test.com' });
+    assert.equal(absent.status, 200);
+    assert.ok(absent.body.recoveryEnvelope, 'bilinmeyen hesaplar da aynı yanıt biçimini kullanmalı');
+    assert.notEqual(absent.body.accountId, prepared.body.accountId);
+    const envelope = {
+        version: 2,
+        strong: { iv: Buffer.alloc(12).toString('base64'), ciphertext: Buffer.alloc(48, 1).toString('base64') },
+        legacy: { version: 1, iv: Buffer.alloc(12, 2).toString('base64'), ciphertext: Buffer.alloc(48, 3).toString('base64') }
+    };
+    const request = { email, next: 'yeni-kurtarma-parolasi-123', kitId, codeHash,
+        cookieKeyEnvelope: envelope };
+    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset',
+        { ...request, codeHash: sha256('wrong-code') })).status, 401);
+    const other = await connectDevice('dev_recovery_other', 'recovery-other-secret-16');
+    const otherEmail = 'other-recovery@test.com';
+    await appSignUp(other, otherEmail, 'other-recovery-password-123');
+    const otherKitId = crypto.randomBytes(16).toString('base64url');
+    const otherHash = sha256('other-recovery-code-proof');
+    assert.equal((await appApi(other, 'POST', '/api/v1/account/recovery-kit', {
+        password: 'other-recovery-password-123', kitId: otherKitId,
+        codeHash: otherHash, recoveryEnvelope, cookieKeyRevision: 0
+    })).status, 200);
+    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset',
+        { ...request, email: otherEmail, kitId: otherKitId })).status, 401,
+    'bir hesabın kurtarma kodu diğer hesapta işe yaramamalı');
+    const recovered = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset', request);
+    assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+    assert.equal(recovered.body.linked, true);
+    assert.equal(recovered.body.cookieKeyRevision, 1);
+    assert.equal((await appApi(nextPhone, 'GET', '/api/v1/sync/key-envelope', null,
+        { 'x-cookie-key-envelope-version': '2' })).body.envelope.strong.ciphertext,
+        envelope.strong.ciphertext);
+    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset', request)).status, 401,
+        'kullanılmış kurtarma kodu yeniden kabul edilmemeli');
+    assert.equal((await appApi(owner, 'GET', '/api/v1/account')).body.linked, false,
+        'eski cihazın hesap bağlantısı kaldırılmalı');
+    assert.equal((await appApi(owner, 'POST', '/api/v1/login', { email, password: oldPassword })).status, 401);
+    owner.close(); nextPhone.close(); other.close();
+});
+
 test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async () => {
     const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
     const device = await connectDevice('dev_catalogue', 'cihaz-sirri-catalogue-16');
@@ -921,67 +1053,6 @@ test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async 
     assert.match(await withCategory.text(), /Fırsatlar/);
 
     device.close();
-});
-
-test('hesaba özel kurtarma kodu eski yedek anahtarını korur, cihazları ayırır ve tek kullanımlıdır', async () => {
-    const owner = await connectDevice('dev_recovery_owner', 'recovery-owner-secret-16');
-    const email = 'recovery-kit@test.com';
-    const oldPassword = 'eski-kurtarma-parolasi-123';
-    await appSignUp(owner, email, oldPassword);
-    const kitId = crypto.randomBytes(16).toString('base64url');
-    const codeHash = sha256('recovery-code-proof');
-    const recoveryEnvelope = {
-        iv: crypto.randomBytes(12).toString('base64url'),
-        ciphertext: crypto.randomBytes(48).toString('base64url')
-    };
-    const created = await appApi(owner, 'POST', '/api/v1/account/recovery-kit', {
-        password: oldPassword, kitId, codeHash, recoveryEnvelope, cookieKeyRevision: 0
-    });
-    assert.equal(created.status, 200, JSON.stringify(created.body));
-    assert.equal(JSON.stringify(created.body).includes(codeHash), false);
-
-    const nextPhone = await connectDevice('dev_recovery_new', 'recovery-new-secret-16');
-    const prepared = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/prepare', { email });
-    assert.equal(prepared.status, 200, JSON.stringify(prepared.body));
-    assert.equal(prepared.body.kitId, kitId);
-    assert.deepEqual(prepared.body.recoveryEnvelope, recoveryEnvelope);
-    assert.equal(JSON.stringify(prepared.body).includes(codeHash), false);
-    const absent = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/prepare',
-        { email: 'someone-else@test.com' });
-    assert.equal(absent.status, 200);
-    assert.ok(absent.body.recoveryEnvelope);
-    assert.notEqual(absent.body.accountId, prepared.body.accountId);
-    const envelope = {
-        version: 2,
-        strong: { iv: Buffer.alloc(12).toString('base64'), ciphertext: Buffer.alloc(48, 1).toString('base64') },
-        legacy: { version: 1, iv: Buffer.alloc(12, 2).toString('base64'), ciphertext: Buffer.alloc(48, 3).toString('base64') }
-    };
-    const request = { email, next: 'yeni-kurtarma-parolasi-123', kitId, codeHash,
-        cookieKeyEnvelope: envelope };
-    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset',
-        { ...request, codeHash: sha256('wrong-code') })).status, 401);
-    const other = await connectDevice('dev_recovery_other', 'recovery-other-secret-16');
-    const otherEmail = 'other-recovery@test.com';
-    await appSignUp(other, otherEmail, 'other-recovery-password-123');
-    const otherKitId = crypto.randomBytes(16).toString('base64url');
-    const otherHash = sha256('other-recovery-code-proof');
-    assert.equal((await appApi(other, 'POST', '/api/v1/account/recovery-kit', {
-        password: 'other-recovery-password-123', kitId: otherKitId,
-        codeHash: otherHash, recoveryEnvelope, cookieKeyRevision: 0
-    })).status, 200);
-    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset',
-        { ...request, email: otherEmail, kitId: otherKitId })).status, 401);
-    const recovered = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset', request);
-    assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
-    assert.equal(recovered.body.linked, true);
-    assert.equal(recovered.body.cookieKeyRevision, 1);
-    assert.equal((await appApi(nextPhone, 'GET', '/api/v1/sync/key-envelope', null,
-        { 'x-cookie-key-envelope-version': '2' })).body.envelope.strong.ciphertext,
-        envelope.strong.ciphertext);
-    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset', request)).status, 401);
-    assert.equal((await appApi(owner, 'GET', '/api/v1/account')).body.linked, false);
-    assert.equal((await appApi(owner, 'POST', '/api/v1/login', { email, password: oldPassword })).status, 401);
-    owner.close(); nextPhone.close(); other.close();
 });
 
 test('kimlik bilgisi sorgu dizesinden kabul edilmez', async () => {
@@ -1283,4 +1354,183 @@ test('giriş yapmış yedek ana cihazda sonradan eklenen oturumu ve şifreli pak
     assert.equal(downloaded.body.credentialPackage.ciphertext, tokenPackage.ciphertext);
     assert.equal(JSON.stringify(inventory).includes(secret), false);
     assert.equal(JSON.stringify(inventory).includes('session=test-baseline'), false);
+});
+
+test('operatör plan ve özellikleri anında değiştirir; mevcut misafir ve bulut yedekleri korunur', async (t) => {
+    const existingGuest = await connectDevice('dev_policy_guest', 'policy-guest-device-secret');
+    t.after(() => existingGuest.close());
+    assert.equal((await appApi(existingGuest, 'POST', '/api/v1/guest')).status, 200);
+    const source = await connectDevice('dev_policy_backup', 'policy-backup-device-secret');
+    t.after(() => source.close());
+    await appSignUp(source, 'policy-backup@test.com', 'policy-backup-password');
+    await appApi(source, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: true, cookiesEnabled: false });
+    const mainSelection = await appApi(source, 'POST', '/api/v1/account/main-device', { deviceId: 'dev_policy_backup' });
+    assert.equal(mainSelection.status, 200);
+    assert.equal((await appApi(source, 'POST', '/api/v1/account/main-device/ready',
+        { generation: mainSelection.body.mainGeneration })).status, 200);
+
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    assert.equal((await visit(operator, '/admin/policy')).status, 200);
+    assert.equal((await fetch(`${BASE}/admin/policy`, { redirect: 'manual' })).status, 303,
+        'yetkisiz kullanıcı ayarları görmemeli');
+    const formFields = {
+        revision: '0', free_maxDevices: '2', free_maxClients: '9', free_commandsPerDay: '6000',
+        pro_maxDevices: '3', pro_maxClients: '50', pro_commandsPerDay: '100000'
+    };
+    const invalid = await form(operator, '/admin/policy', { ...formFields, free_maxDevices: '0' });
+    assert.equal(invalid.status, 303);
+    assert.match(invalid.headers.get('location'), /err=/);
+    const saved = await form(operator, '/admin/policy', formFields);
+    assert.equal(saved.status, 303);
+    assert.match(saved.headers.get('location'), /ok=/);
+    const stale = await form(operator, '/admin/policy', formFields);
+    assert.match(stale.headers.get('location'), /err=/, 'eski form güncel ayarı ezmemeli');
+
+    const account = await appApi(operatorDevice, 'GET', '/api/v1/account');
+    assert.equal(account.body.quota.maxDevices, 2);
+    assert.equal(account.body.quota.maxClients, 9);
+    assert.equal(account.body.quota.commandsPerDay, 6000);
+    assert.deepEqual(account.body.features, {
+        registration: false, guestEntry: false, cloudBackupUploads: false
+    });
+    const extraOperatorDevice = await connectDevice('dev_policy_operator_2', 'policy-operator-second-secret');
+    t.after(() => extraOperatorDevice.close());
+    assert.equal((await appApi(extraOperatorDevice, 'POST', '/api/v1/login', {
+        email: OPERATOR_EMAIL, password: 'operator-parolasi-uzun'
+    })).status, 200, 'artırılan Free cihaz kotası girişte uygulanmalı');
+    const noCsrf = await visit(operator, '/admin/policy', { method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(formFields).toString() });
+    assert.match(noCsrf.headers.get('location'), /err=/, 'CSRF olmadan ayarlar değişmemeli');
+    assert.equal((await appApi(existingGuest, 'POST', '/api/v1/guest')).status, 200,
+        'mevcut misafir kapatılmamalı');
+    const newDevice = await connectDevice('dev_policy_new', 'policy-new-device-secret');
+    t.after(() => newDevice.close());
+    assert.equal((await appApi(newDevice, 'GET', '/api/v1/account')).body.features.guestEntry, false);
+    assert.equal((await appApi(newDevice, 'POST', '/api/v1/guest')).body.error, 'guest_entry_closed');
+    assert.equal((await appApi(newDevice, 'POST', '/api/v1/register', {
+        email: 'policy-new@test.com', password: 'policy-test-password'
+    })).body.error, 'registration_closed');
+    assert.equal((await appApi(operatorDevice, 'GET', '/api/v1/sync')).status, 200);
+    assert.equal((await appApi(operatorDevice, 'GET', '/api/v1/sync/cookie-backups')).status, 200);
+    assert.equal((await appApi(operatorDevice, 'PUT', '/api/v1/sync/clients/nonexistent/credential', {})).body.error,
+        'backup_uploads_closed');
+    source.send({ type: 'client_added', clientId: 'cli_policy_local', secretHash: sha256('policy-local-secret'), name: 'Local only' });
+    let routeExists = false;
+    for (let attempt = 0; attempt < 25; attempt++) {
+        routeExists = (await appApi(source, 'GET', '/api/v1/account')).body.counts.clients >= 1;
+        if (routeExists) break;
+        await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    assert.equal(routeExists, true, 'yerel bağlantı oluşturulmalı');
+    assert.equal((await appApi(source, 'GET', '/api/v1/sync')).body.clients.length, 0,
+        'kapalı yedek yüklemesi yerel bağlantıyı buluta yayımlamamalı');
+
+    const restored = await form(operator, '/admin/policy', {
+        revision: '1', free_maxDevices: '1', free_maxClients: '8', free_commandsPerDay: '5000',
+        pro_maxDevices: '3', pro_maxClients: '50', pro_commandsPerDay: '100000',
+        registration: 'on', guestEntry: 'on', cloudBackupUploads: 'on'
+    });
+    assert.equal(restored.status, 303);
+    assert.match(restored.headers.get('location'), /ok=/);
+    await appApi(source, 'POST', '/api/v1/sync/device-mode', { sessionsEnabled: true, cookiesEnabled: false });
+    assert.equal((await appApi(source, 'GET', '/api/v1/sync')).body.clients.length, 1,
+        'yeniden açılınca açıkça etkinleştirilen yedekleme bağlantıyı yayımlamalı');
+    assert.equal((await appApi(extraOperatorDevice, 'GET', '/api/v1/account')).body.linked, true,
+        'kota tekrar düşürüldüğünde mevcut cihaz koparılmamalı');
+});
+
+test('Pro bitince Free seçimi istenir; seçilmeyen oturum ve şifreli bulut yedeği silinmez', async (t) => {
+    const email = 'free-downgrade@test.com', password = 'free-downgrade-password';
+    const main = await connectDevice('dev_free_downgrade_main', 'free-downgrade-main-secret');
+    t.after(() => main.close());
+    const signedUp = await appSignUp(main, email, password);
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    assert.equal((await form(operator, '/admin/accounts/plan', {
+        accountId: signedUp.accountId, plan: 'pro'
+    })).status, 303);
+    const backup = await connectDevice('dev_free_downgrade_backup', 'free-downgrade-backup-secret');
+    t.after(() => backup.close());
+    assert.equal((await appApi(backup, 'POST', '/api/v1/login', { email, password })).status, 200);
+    assert.equal((await appApi(main, 'POST', '/api/v1/account/main-device', {
+        deviceId: 'dev_free_downgrade_main'
+    })).status, 200);
+    const syncMode = await appApi(main, 'POST', '/api/v1/sync/device-mode', {
+        sessionsEnabled: true, cookiesEnabled: true
+    });
+    assert.equal(syncMode.status, 200);
+    assert.equal((await appApi(main, 'POST', '/api/v1/account/main-device/ready', {
+        generation: syncMode.body.mainGeneration
+    })).status, 200);
+    const sessions = Array.from({ length: 9 }, (_, index) => ({
+        clientId: `cli_free_downgrade_${index}`, secret: `free-downgrade-secret-${index}`
+    }));
+    for (const session of sessions) main.send({ type: 'client_added',
+        clientId: session.clientId, secretHash: sha256(session.secret), name: `AI ${session.clientId}` });
+    let before;
+    for (let attempt = 0; attempt < 40; attempt++) {
+        before = await appApi(main, 'GET', '/api/v1/sync');
+        if (before.body.clients.length === sessions.length) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(before.body.clients.length, 9);
+    const first = sessions[0], last = sessions.at(-1);
+    backup.send({ type: 'client_added', clientId: first.clientId,
+        secretHash: sha256(first.secret), name: 'AI shared before downgrade' });
+    for (let attempt = 0; attempt < 40; attempt++) {
+        const inventory = await appApi(main, 'GET', '/api/v1/sync');
+        if (inventory.body.clients.find((session) => session.clientId === first.clientId)
+            ?.deviceIds.includes('dev_free_downgrade_backup')) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal((await appApi(main, 'POST', `/api/v1/sync/clients/${first.clientId}/cookies/enable`)).status, 200);
+    const cookiePackage = Buffer.from('downgrade-test-encrypted-cookie-package').toString('base64');
+    const accountBefore = await appApi(main, 'GET', '/api/v1/account');
+    assert.equal((await appApi(main, 'PUT', `/api/v1/sync/clients/${first.clientId}/cookies`, {
+        version: 2, generation: accountBefore.body.mainGeneration,
+        iv: Buffer.from('on-iki-byte-iv').toString('base64'), ciphertext: cookiePackage
+    })).status, 200);
+    assert.equal((await form(operator, '/admin/accounts/plan', {
+        accountId: signedUp.accountId, plan: 'free'
+    })).status, 303);
+    const required = await appApi(backup, 'GET', '/api/v1/account');
+    assert.equal(required.body.freeAccess.required, true);
+    assert.equal(required.body.counts.devices, 2);
+    assert.equal(required.body.counts.clients, 9);
+    assert.equal((await callTool(`${first.clientId}.${first.secret}`)).status, 403);
+    assert.equal((await appApi(backup, 'POST', '/api/v1/account/free-selection', {
+        revision: required.body.freeAccess.revision,
+        deviceIds: ['dev_free_downgrade_main'],
+        clientIds: ['cli_credential_share'],
+        mainDeviceId: 'dev_free_downgrade_main'
+    })).status, 409, 'başka hesaba ait AI oturumu seçilebildi');
+    const chosen = await appApi(backup, 'POST', '/api/v1/account/free-selection', {
+        revision: required.body.freeAccess.revision,
+        deviceIds: ['dev_free_downgrade_main'],
+        clientIds: sessions.slice(0, 8).map((session) => session.clientId),
+        mainDeviceId: 'dev_free_downgrade_main'
+    });
+    assert.equal(chosen.status, 200, JSON.stringify(chosen.body));
+    assert.equal(chosen.body.freeAccess.required, false);
+    assert.equal((await appApi(backup, 'POST', '/api/v1/account/free-selection', {
+        revision: required.body.freeAccess.revision,
+        deviceIds: ['dev_free_downgrade_backup'], clientIds: [],
+        mainDeviceId: 'dev_free_downgrade_backup'
+    })).status, 409, 'eski revizyonla seçim yeniden yazıldı');
+    assert.equal((await callTool(`${first.clientId}.${first.secret}`)).status, 200);
+    const pausedRoute = await callTool(`${first.clientId}.${first.secret}`, {
+        deviceId: 'dev_free_downgrade_backup'
+    });
+    assert.equal(pausedRoute.status, 502);
+    assert.match((await pausedRoute.json()).error, /free_device_paused/);
+    assert.equal((await callTool(`${last.clientId}.${last.secret}`)).status, 403);
+    const after = await appApi(backup, 'GET', '/api/v1/sync');
+    assert.equal(after.status, 200, 'duraklatılmış cihaz hesap/yedek yönetimine erişemedi');
+    assert.equal(after.body.clients.length, 9, 'AI oturumu buluttan silindi');
+    assert.equal(after.body.clients.find((session) => session.clientId === first.clientId)
+        .cookieSnapshot.ciphertext, cookiePackage, 'şifreli bulut çerez yedeği silindi');
+    assert.equal((await form(operator, '/admin/accounts/plan', {
+        accountId: signedUp.accountId, plan: 'pro'
+    })).status, 303);
+    assert.equal((await callTool(`${last.clientId}.${last.secret}`)).status, 200);
 });

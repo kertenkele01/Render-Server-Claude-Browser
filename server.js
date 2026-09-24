@@ -36,6 +36,7 @@ try {
     console.warn('[Config] Could not read .env:', e.message);
 }
 const limits = require('./lib/limits');
+const googlePlay = require('./lib/google-play').createGooglePlayClient();
 require('./lib/network').publicOrigin(); // Reject invalid public origin at boot.
 app.set('trust proxy', limits.trustProxy);
 const { argumentsProblem, operationCache } = require('./lib/command-safety');
@@ -126,6 +127,7 @@ const devices = new Map(); // deviceId -> { id, accountId, secretHash, name, ...
 const clients = new Map(); // clientId -> { id, deviceId, deviceIds[], accountId, secretHash, name }
 
 let store = null;
+let appliedProductPolicyRevision = 0;
 
 async function activeQuickLinkCatalogue() {
     const result = await store.listQuickLinks();
@@ -157,6 +159,48 @@ function safeEquals(a, b) {
 // Accounts are read on the hot path only to check `status` and `plan`, both of
 // which change rarely, so the same read-through treatment applies.
 const accountCache = new Map(); // accountId -> account
+const accountDeviceIds = new Map(); // accountId -> Set<deviceId>
+const accountClientIds = new Map(); // accountId -> Set<clientId>
+
+function freeAccessState(account) {
+    if (!account) return null;
+    return limits.freeSelectionStatus(account,
+        accountDeviceIds.get(account.id) || [], accountClientIds.get(account.id) || []);
+}
+
+async function notifyAccountPlanChanged(accountId) {
+    for (const device of await store.listDevices(accountId)) {
+        const socket = browsers.get(device.id);
+        if (socket?.readyState === 1) {
+            try { socket.send(JSON.stringify({ type: 'account_plan_changed' })); } catch (_) { /* Reconnect refreshes state. */ }
+        }
+    }
+}
+
+/** Resolves a paid Play entitlement without turning Google Play into an MCP
+ * authorization authority. The relay still owns its plan limits; Play only
+ * proves whether the account paid for the Pro tier. */
+async function effectiveAccount(account) {
+    if (!account) return null;
+    const subscription = await store.getPlayEntitlement(account.id);
+    const playActive = subscription?.active === true && Number(subscription.expiresAt || 0) > Date.now();
+    const manualPro = account.plan === 'pro';
+    return {
+        ...account,
+        plan: manualPro || playActive ? 'pro' : 'free',
+        planSource: manualPro ? 'operator' : (playActive ? 'google_play' : 'free'),
+        planValidUntil: !manualPro && playActive ? Number(subscription.expiresAt) : null,
+        billing: subscription ? {
+            state: subscription.state,
+            active: playActive,
+            productId: subscription.productId,
+            basePlanId: subscription.basePlanId || '',
+            expiresAt: Number(subscription.expiresAt || 0),
+            willRenew: subscription.willRenew === true,
+            environment: subscription.environment || 'production'
+        } : null
+    };
+}
 
 /** Rebuilds the hot-path cache from the store. */
 async function refreshRegistryCache() {
@@ -167,6 +211,18 @@ async function refreshRegistryCache() {
     devices.clear();
     clientRows.forEach((c) => clients.set(c.id, c));
     deviceRows.forEach((d) => devices.set(d.id, d));
+    accountDeviceIds.clear();
+    accountClientIds.clear();
+    deviceRows.forEach((d) => {
+        if (!d.accountId) return;
+        if (!accountDeviceIds.has(d.accountId)) accountDeviceIds.set(d.accountId, new Set());
+        accountDeviceIds.get(d.accountId).add(d.id);
+    });
+    clientRows.forEach((c) => {
+        if (!c.accountId) return;
+        if (!accountClientIds.has(c.accountId)) accountClientIds.set(c.accountId, new Set());
+        accountClientIds.get(c.accountId).add(c.id);
+    });
     for (const id of [...clients.keys()]) {
         if (!clientRows.some((c) => c.id === id)) clients.delete(id);
     }
@@ -174,7 +230,7 @@ async function refreshRegistryCache() {
     deviceRows.forEach((d) => d.accountId && accountIds.add(d.accountId));
     accountCache.clear();
     for (const id of accountIds) {
-        const account = await store.getAccountById(id);
+        const account = await effectiveAccount(await store.getAccountById(id));
         if (account) accountCache.set(id, account);
     }
 
@@ -1585,6 +1641,18 @@ function requireAuth(req, res) {
         return null;
     }
 
+    const freeAccess = freeAccessState(auth.account);
+    if (freeAccess?.required) {
+        res.status(403).json({ error: 'free_selection_required',
+            message: 'The Pro plan ended or Free limits changed. Ask the account owner to choose active devices and AI sessions in the Android app. No data was deleted.' });
+        return null;
+    }
+    if (freeAccess?.overLimit && !freeAccess.activeClientIds.includes(auth.clientId)) {
+        res.status(403).json({ error: 'free_client_paused',
+            message: 'This AI session is paused under the Free plan. Ask the owner to select it in the Android app or reactivate Pro. Its data and backups are preserved.' });
+        return null;
+    }
+
     limits.reset('credential', ip);
     return auth;
 }
@@ -1642,6 +1710,21 @@ async function enforceQuota(auth, refuse) {
 function boundDeviceIds(record) {
     const ids = Array.isArray(record && record.deviceIds) ? [...record.deviceIds] : [];
     return [...new Set(ids.filter(Boolean))];
+}
+
+async function clientCreationLimit(accountId) {
+    if (!accountId) return null;
+    const account = accountCache.get(accountId) || await effectiveAccount(await store.getAccountById(accountId));
+    return limits.planFor(account).maxClients;
+}
+
+async function mayCreateClient(accountId, clientId) {
+    if (!accountId || clients.has(clientId)) return true;
+    const [maximum, current] = await Promise.all([
+        clientCreationLimit(accountId),
+        store.countClients(accountId)
+    ]);
+    return maximum === null || current < maximum;
 }
 
 function onlineBrowser(deviceId) {
@@ -1740,6 +1823,12 @@ function dispatchCommandToBrowser(type, args, clientId, clientSecret, requestedD
             deviceId = selectBoundDevice(record, requestedDeviceId);
         } catch (e) {
             return reject(e);
+        }
+        const freeAccess = freeAccessState(record.accountId && accountCache.get(record.accountId));
+        if (freeAccess?.overLimit && (freeAccess.required ||
+            !freeAccess.activeClientIds.includes(clientId) ||
+            !freeAccess.activeDeviceIds.includes(deviceId))) {
+            return reject(new Error('free_device_paused: This device or AI session is paused under the Free plan. Select it in the Android app; saved data is preserved.'));
         }
         const ws = onlineBrowser(deviceId);
         if (!ws) return reject(new Error(`The selected device (${deviceChoiceLabel(deviceId)}) went offline before the command could be sent.`));
@@ -1920,6 +2009,7 @@ wss.on('connection', (ws, request) => {
             }
 
             deviceId = id;
+            const clientLimitRejected = [];
 
             // The device is the authority on which clients exist. Rebuild its
             // slice of the registry from what it just told us.
@@ -1933,8 +2023,19 @@ wss.on('connection', (ws, request) => {
                         list.push({ id: cid, secretHash: hash, name: String(c.name || 'AI istemcisi').substring(0, 60) });
                     }
                 });
-                const reconciliation = await store.replaceDeviceClients(id, list);
-                await store.publishDeviceClients((await store.getDevice(id))?.accountId, id);
+                const registeredDevice = await store.getDevice(id);
+                const accountId = registeredDevice?.accountId;
+                let remaining = accountId
+                    ? Math.max(0, (await clientCreationLimit(accountId)) - await store.countClients(accountId))
+                    : Number.MAX_SAFE_INTEGER;
+                const allowedList = list.filter((client) => {
+                    if (clients.has(client.id)) return true;
+                    if (remaining > 0) { remaining--; return true; }
+                    clientLimitRejected.push(client.id);
+                    return false;
+                });
+                const reconciliation = await store.replaceDeviceClients(id, allowedList);
+                if (limits.FEATURES.cloudBackupUploads) await store.publishDeviceClients(accountId, id);
                 if (reconciliation && reconciliation.conflicts && reconciliation.conflicts.length > 0) {
                     console.warn(`[WS] Device '${id}' could not bind conflicting clients: ${reconciliation.conflicts.join(', ')}`);
                 }
@@ -1968,6 +2069,7 @@ wss.on('connection', (ws, request) => {
                 guestId: record?.guestId || null,
                 maxResponseBytes: MAX_DEVICE_RESPONSE_BYTES,
                 backupManagementVersion: 1,
+                clientLimitRejected,
                 catalog: await activeQuickLinkCatalogue()
             }));
             return;
@@ -2027,6 +2129,20 @@ wss.on('connection', (ws, request) => {
             const cid = String(payload.clientId || '').trim();
             const hash = String(payload.secretHash || '').trim();
             if (!cid || !/^[a-f0-9]{64}$/i.test(hash)) return;
+            const source = devices.get(deviceId);
+            if (!(await mayCreateClient(source?.accountId, cid))) {
+                const maximum = await clientCreationLimit(source.accountId);
+                addLog(cid, payload.name, deviceId, 'AI Oturumu Limiti', 'quota', `Plan en fazla ${maximum} yeni AI bağlantısına izin veriyor.`);
+                try {
+                    ws.send(JSON.stringify({
+                        type: 'client_limit_rejected',
+                        clientId: cid,
+                        maximum,
+                        reason: `Planınız en fazla ${maximum} AI bağlantısına izin veriyor.`
+                    }));
+                } catch (e) {}
+                return;
+            }
             const stored = await store.upsertClient({
                 id: cid,
                 deviceId,
@@ -2045,7 +2161,7 @@ wss.on('connection', (ws, request) => {
                 return;
             }
             await refreshRegistryCache();
-            await store.publishDeviceClients(stored.accountId, deviceId);
+            if (limits.FEATURES.cloudBackupUploads) await store.publishDeviceClients(stored.accountId, deviceId);
             addLog(cid, payload.name, deviceId, 'İstemci Eklendi', 'success', 'Cihaz yeni bir erişim anahtarı üretti.');
             return;
         }
@@ -2094,6 +2210,14 @@ wss.on('connection', (ws, request) => {
             const locale = payload.locale == null ? null : oauth.normaliseLanguage(payload.locale);
             const record = clients.get(cid);
             const d = devices.get(deviceId);
+            const freeAccess = freeAccessState(d?.accountId && accountCache.get(d.accountId));
+            if (freeAccess?.overLimit && (freeAccess.required ||
+                !freeAccess.activeDeviceIds.includes(deviceId) ||
+                !freeAccess.activeClientIds.includes(cid))) {
+                ws.send(JSON.stringify({ type: 'oauth_pairing_code', status: 'rejected', clientId: cid,
+                    reason: 'Bu cihaz veya AI oturumu Free planında duraklatıldı. Uygulamada etkin seçimleri değiştirin.' }));
+                return;
+            }
             if (d?.accountId && accountCache.get(d.accountId)?.defaultDeviceId !== deviceId && !management.permissions(d).canReadTokens) {
                 ws.send(JSON.stringify({type:'oauth_pairing_code', status:'rejected', clientId:cid,
                     reason:'Bu cihazın token alma yetkisi kapalı. Ana cihazın ayarlarından izin verin.'})); return;
@@ -3282,6 +3406,11 @@ app.post('/oauth/token', async (req, res) => {
             error_description: 'Bu koda bağlı erişim anahtarı artık geçerli değil.'
         });
     }
+    const freeAccess = freeAccessState(record.accountId && accountCache.get(record.accountId));
+    if (freeAccess?.overLimit && (freeAccess.required || !freeAccess.activeClientIds.includes(record.id))) {
+        return res.status(400).json({ error: 'invalid_grant',
+            error_description: 'Bu AI oturumu Free planında duraklatıldı. Hesap sahibi uygulamada etkin oturumları seçmelidir.' });
+    }
 
     try { await store.touchOAuthClient(grant.oauthClientId, Date.now()); } catch (e) { /* not worth failing a login over */ }
 
@@ -3411,9 +3540,130 @@ function requireDevice(req, res) {
     return device;
 }
 
+async function syncGooglePlaySubscription(purchaseToken, expectedAccountId = null, { refreshCache = true } = {}) {
+    if (!googlePlay.configured) throw new Error('google_play_not_configured');
+    const verified = await googlePlay.verifySubscription(purchaseToken);
+    const existing = await store.getPlaySubscription(verified.tokenHash);
+
+    let account = expectedAccountId ? await store.getAccountById(expectedAccountId) : null;
+    if (!account && existing?.accountId) account = await store.getAccountById(existing.accountId);
+    if (!account && verified.obfuscatedAccountId) {
+        account = await store.getAccountByBillingId(verified.obfuscatedAccountId);
+    }
+    if (!account) throw new Error('purchase_account_not_found');
+
+    const expectedBillingId = googlePlay.accountIdentifier(account.id);
+    if (!verified.obfuscatedAccountId || !safeEquals(verified.obfuscatedAccountId, expectedBillingId)) {
+        throw new Error('purchase_account_mismatch');
+    }
+    if (existing && existing.accountId !== account.id) throw new Error('purchase_already_linked');
+
+    const stored = await store.upsertPlaySubscription({ ...verified, accountId: account.id });
+    if (!stored) throw new Error('purchase_already_linked');
+
+    let acknowledged = stored.acknowledgementState !== 'ACKNOWLEDGEMENT_STATE_PENDING';
+    let acknowledgePending = false;
+    if (verified.active && !acknowledged) {
+        try {
+            await googlePlay.acknowledgeSubscription(verified);
+            verified.acknowledgementState = 'ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED';
+            await store.upsertPlaySubscription({ ...verified, accountId: account.id });
+            acknowledged = true;
+        } catch (e) {
+            // Entitlement was durably recorded first. A later app restore,
+            // webhook or reconciliation pass retries acknowledgement.
+            acknowledgePending = true;
+            console.warn('[Billing] Google Play acknowledgement will be retried:', e.message);
+        }
+    }
+
+    if (refreshCache) {
+        await refreshRegistryCache();
+        await notifyAccountPlanChanged(account.id);
+    }
+    return { accountId: account.id, subscription: { ...verified, purchaseToken: undefined }, acknowledged, acknowledgePending };
+}
+
+app.post('/api/v1/billing/google-play/verify', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Satın alma için önce hesaba giriş yapın.' });
+    if (!googlePlay.configured) {
+        return res.status(503).json({ error: 'billing_not_configured', message: 'Google Play satın alma sistemi henüz yapılandırılmadı.' });
+    }
+    const purchaseToken = String(req.body?.purchaseToken || '').trim();
+    if (purchaseToken.length < 10 || purchaseToken.length > 4096) {
+        return res.status(400).json({ error: 'invalid_purchase_token', message: 'Satın alma bilgisi geçersiz.' });
+    }
+    try {
+        const result = await syncGooglePlaySubscription(purchaseToken, device.accountId);
+        addLog(null, 'Google Play', device.id, 'Pro Satın Alma Doğrulandı', 'success',
+            result.subscription.active ? 'Pro erişimi güncellendi.' : 'Satın alma henüz Pro erişimi vermiyor.');
+        const snapshot = await accountSnapshot(devices.get(device.id) || device);
+        res.json({ ...snapshot, purchase: {
+            verified: true,
+            active: result.subscription.active,
+            state: result.subscription.state,
+            expiresAt: result.subscription.expiresAt,
+            acknowledged: result.acknowledged,
+            acknowledgePending: result.acknowledgePending
+        } });
+    } catch (e) {
+        const known = {
+            invalid_purchase_token: [400, 'Satın alma bilgisi geçersiz.'],
+            google_play_product_mismatch: [409, 'Satın alma bu uygulamanın Pro ürününe ait değil.'],
+            purchase_account_mismatch: [409, 'Bu satın alma farklı bir uygulama hesabına bağlı.'],
+            purchase_already_linked: [409, 'Bu satın alma başka bir uygulama hesabına bağlı.'],
+            purchase_account_not_found: [409, 'Satın almanın bağlı olduğu uygulama hesabı bulunamadı.']
+        };
+        const key = String(e.message || '').split(':')[0];
+        const [status, message] = known[key] || [502, 'Google Play satın alma bilgisi doğrulanamadı. Biraz sonra tekrar deneyin.'];
+        console.warn('[Billing] Purchase verification failed:', key);
+        res.status(status).json({ error: key || 'purchase_verification_failed', message });
+    }
+});
+
+/** Authenticated Google Cloud Pub/Sub push endpoint for Play RTDN messages. */
+app.post('/api/v1/billing/google-play/rtdn', async (req, res) => {
+    if (!googlePlay.rtdnConfigured) return res.status(503).json({ error: 'rtdn_not_configured' });
+    try {
+        await googlePlay.verifyRtdnAuthorization(req.headers.authorization);
+    } catch (e) {
+        return res.status(401).json({ error: 'invalid_push_identity' });
+    }
+    const message = req.body?.message;
+    const messageId = String(message?.messageId || '').trim();
+    if (!messageId || !message?.data || messageId.length > 256) {
+        return res.status(400).json({ error: 'invalid_pubsub_message' });
+    }
+    if (await store.hasPlayNotification(messageId)) return res.sendStatus(204);
+
+    let event;
+    try {
+        const decoded = Buffer.from(String(message.data), 'base64').toString('utf8');
+        if (Buffer.byteLength(decoded) > 64 * 1024) throw new Error('too_large');
+        event = JSON.parse(decoded);
+    } catch (_) {
+        return res.status(400).json({ error: 'invalid_rtdn_payload' });
+    }
+    if (event.packageName !== googlePlay.packageName) return res.status(400).json({ error: 'package_mismatch' });
+
+    try {
+        const purchaseToken = String(event.subscriptionNotification?.purchaseToken || '').trim();
+        if (purchaseToken) await syncGooglePlaySubscription(purchaseToken);
+        // Test notifications and unsupported future event kinds are safely
+        // acknowledged after their package and push identity are verified.
+        await store.recordPlayNotification(messageId, Date.now());
+        res.sendStatus(204);
+    } catch (e) {
+        console.warn('[Billing] RTDN processing failed:', String(e.message || '').split(':')[0]);
+        res.status(503).json({ error: 'rtdn_processing_failed' });
+    }
+});
+
 /** The account view the app renders. Never includes a hash or a secret. */
 async function accountSnapshot(device) {
-    const account = device.accountId ? await store.getAccountById(device.accountId) : null;
+    const account = device.accountId ? await effectiveAccount(await store.getAccountById(device.accountId)) : null;
     if (!account) {
         const guest = !!device.guestId;
         const plan = limits.planFor(null);
@@ -3423,6 +3673,9 @@ async function accountSnapshot(device) {
             linked: false,
             guest,
             guestId: guest ? device.guestId : '',
+            features: { registration: ALLOW_REGISTRATION && limits.FEATURES.registration,
+                guestEntry: limits.FEATURES.guestEntry,
+                cloudBackupUploads: limits.FEATURES.cloudBackupUploads },
             deviceId: device.id,
             deviceName: device.name,
             plan: guest ? { id: 'guest', label: 'Misafir' } : undefined,
@@ -3440,11 +3693,13 @@ async function accountSnapshot(device) {
         };
     }
     const plan = limits.planFor(account);
-    const [usage, deviceCount, clientCount] = await Promise.all([
+    const [usage, ownedDevices, ownedClients] = await Promise.all([
         store.getUsage(account.id, limits.currentUsageWindow()),
-        store.countDevices(account.id),
-        store.countClients(account.id)
+        store.listDevices(account.id),
+        store.listClients(account.id)
     ]);
+    const freeAccess = limits.freeSelectionStatus(account,
+        ownedDevices.map((row) => row.id), ownedClients.map((row) => row.id));
     return {
         linked: true,
         accountId: account.id,
@@ -3461,15 +3716,48 @@ async function accountSnapshot(device) {
         // were separated.
         syncEnabled: device.syncEnabled === true,
         email: account.email,
+        features: { registration: ALLOW_REGISTRATION && limits.FEATURES.registration,
+            guestEntry: limits.FEATURES.guestEntry,
+            cloudBackupUploads: limits.FEATURES.cloudBackupUploads },
         status: account.status,
-        plan: { id: account.plan, label: plan.label },
+        plan: { id: account.plan, label: plan.label, source: account.planSource || 'free' },
         quota: {
             commandsUsed: usage.commandCount,
             commandsPerDay: plan.commandsPerDay,
             maxDevices: plan.maxDevices,
+            maxClients: plan.maxClients,
             auditRetentionDays: plan.auditRetentionDays
         },
-        counts: { devices: deviceCount, clients: clientCount }
+        freeAccess: freeAccess.overLimit ? {
+            overLimit: true, required: freeAccess.required,
+            revision: account.freeSelectionRevision || 0,
+            maxDevices: plan.maxDevices, maxClients: plan.maxClients,
+            activeDeviceIds: freeAccess.activeDeviceIds,
+            activeClientIds: freeAccess.activeClientIds,
+            mainDeviceId: account.defaultDeviceId || '',
+            devices: ownedDevices.map((row) => ({ deviceId: row.id, name: row.name,
+                isCurrent: row.id === device.id, isMain: row.id === account.defaultDeviceId,
+                online: browsers.has(row.id) })),
+            clients: ownedClients.map((row) => ({ clientId: row.id, name: row.name,
+                deviceIds: boundDeviceIds(row), cloudPublished: row.cloudPublished === true }))
+        } : { overLimit: false, required: false },
+        billing: {
+            configured: googlePlay.configured,
+            productId: googlePlay.productId,
+            obfuscatedAccountId: googlePlay.accountIdentifier(account.id),
+            state: account.billing?.state || 'NONE',
+            active: account.billing?.active === true,
+            basePlanId: account.billing?.basePlanId || '',
+            expiresAt: account.billing?.expiresAt || 0,
+            willRenew: account.billing?.willRenew === true,
+            environment: account.billing?.environment || 'production'
+        },
+        upgrade: {
+            commandsPerDay: limits.PLANS.pro.commandsPerDay,
+            maxDevices: limits.PLANS.pro.maxDevices,
+            maxClients: limits.PLANS.pro.maxClients
+        },
+        counts: { devices: ownedDevices.length, clients: ownedClients.length }
     };
 }
 
@@ -3495,6 +3783,9 @@ app.post('/api/v1/guest', async (req, res) => {
             error: 'account_already_linked',
             message: 'Bu telefon zaten bir hesaba bağlı. Misafir moda geçmeden önce hesaptan çıkın.'
         });
+    }
+    if (!device.guestId && !limits.FEATURES.guestEntry) {
+        return res.status(403).json({ error: 'guest_entry_closed', message: 'Yeni misafir girişleri geçici olarak kapalı. Mevcut misafir oturumları etkilenmez.' });
     }
 
     let guestId = device.guestId;
@@ -3526,7 +3817,7 @@ app.post('/api/v1/register', async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;
 
-    if (!ALLOW_REGISTRATION) {
+    if (!ALLOW_REGISTRATION || !limits.FEATURES.registration) {
         return res.status(403).json({ error: 'registration_closed', message: 'Bu köprü yeni kayıtlara kapalı.' });
     }
 
@@ -3692,6 +3983,49 @@ app.get('/api/v1/account', async (req, res) => {
     res.json(await accountSnapshot(device));
 });
 
+/** Select Free-active routes without deleting devices, local profiles or any
+ * encrypted cloud packages. Account API remains usable from a paused phone. */
+app.post('/api/v1/account/free-selection', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
+    const account = await effectiveAccount(await store.getAccountById(device.accountId));
+    const plan = limits.planFor(account);
+    if (plan !== limits.PLANS.free) return res.status(409).json({ error: 'not_free_plan' });
+    const body = req.body || {};
+    const deviceIds = body.deviceIds, clientIds = body.clientIds;
+    const mainDeviceId = body.mainDeviceId;
+    const revision = body.revision;
+    if (!Array.isArray(deviceIds) || !Array.isArray(clientIds) ||
+        deviceIds.length < 1 || deviceIds.length > plan.maxDevices ||
+        clientIds.length > plan.maxClients ||
+        deviceIds.some((id) => typeof id !== 'string' || !id || id.length > 256) ||
+        clientIds.some((id) => typeof id !== 'string' || !id || id.length > 256) ||
+        new Set(deviceIds).size !== deviceIds.length || new Set(clientIds).size !== clientIds.length ||
+        typeof mainDeviceId !== 'string' || !deviceIds.includes(mainDeviceId) ||
+        !Number.isSafeInteger(revision) || revision < 0) {
+        return res.status(400).json({ error: 'invalid_free_selection', message: 'Etkin cihaz ve AI oturumu seçimi geçersiz.' });
+    }
+    const [ownedDevices, ownedClients] = await Promise.all([
+        store.listDevices(account.id), store.listClients(account.id)
+    ]);
+    if (!limits.freeSelectionStatus(account,
+        ownedDevices.map((row) => row.id), ownedClients.map((row) => row.id)).overLimit) {
+        return res.status(409).json({ error: 'selection_not_needed', message: 'Hesap artık Free sınırını aşmıyor.' });
+    }
+    const previousMain = account.defaultDeviceId;
+    const saved = await store.setFreeSelection(account.id, revision,
+        { deviceIds, clientIds, mainDeviceId }, plan.maxDevices, plan.maxClients);
+    if (!saved) return res.status(409).json({ error: 'free_selection_changed',
+        message: 'Hesap, cihaz listesi veya seçim değişti. Yenileyip tekrar seçin.' });
+    await refreshRegistryCache();
+    addLog(null, 'Uygulama', device.id, 'Free Etkin Kullanım Seçildi', 'warning',
+        `${deviceIds.length} cihaz ve ${clientIds.length} AI oturumu etkin; diğerleri silinmeden duraklatıldı.`);
+    await notifyAccountPlanChanged(account.id);
+    if (previousMain !== mainDeviceId) await notifyAccountSyncChanged(account.id);
+    res.json(await accountSnapshot(devices.get(device.id)));
+});
+
 /** Makes the calling phone the explicit no-deviceId route for this account. */
 // Selection changes routing and the sole cloud writer together. The target phone
 // prepares the cloud baseline before acknowledging readiness; selection never enables sync.
@@ -3701,6 +4035,11 @@ app.post(['/api/v1/account/main-device', '/api/v1/account/default-device'], asyn
     if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
     const targetId = req.body?.enabled === false ? null : String(req.body?.deviceId || device.id);
     const account = accountCache.get(device.accountId);
+    const freeAccess = freeAccessState(account);
+    if (freeAccess?.overLimit && (!targetId || !freeAccess.activeDeviceIds.includes(targetId))) {
+        return res.status(403).json({ error: 'free_device_paused',
+            message: 'Free planında ana cihaz yalnızca etkin cihazlardan seçilebilir. Önce etkin cihaz seçimini değiştirin.' });
+    }
     const target = targetId ? await store.getDevice(targetId) : null;
     if (account?.defaultDeviceId && account.defaultDeviceId !== device.id &&
         (targetId !== device.id || !management.permissions(device).canBecomeMain)) {
@@ -3818,7 +4157,7 @@ app.post('/api/v1/account/main-device/ready', async (req, res) => {
     if (!device.accountId || !device.syncEnabled) return res.status(403).json({ error: 'sync_disabled' });
     const ready = await store.markMainReady(device.accountId, device.id, Number(req.body?.generation));
     if (!ready) return res.status(409).json({ error: 'main_device_changed', message: 'Ana cihaz değişti; eşitlemeyi yenileyin.' });
-    await store.publishDeviceClients(device.accountId, device.id);
+    if (limits.FEATURES.cloudBackupUploads) await store.publishDeviceClients(device.accountId, device.id);
     await refreshRegistryCache();
     res.json({ status: 'ok', ...(await accountSnapshot(devices.get(device.id))) });
 });
@@ -3950,6 +4289,7 @@ app.put('/api/v1/sync/clients/:clientId/credential', async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;
     if (!device.accountId) return res.status(403).json({ error: 'not_linked' });
+    if (!limits.FEATURES.cloudBackupUploads) return res.status(403).json({ error: 'backup_uploads_closed', message: 'Yeni bulut yedek yüklemeleri geçici olarak kapalı. Mevcut yedekler erişilebilir.' });
     const body = req.body || {};
     const allowed = ['version', 'secretHash', 'iv', 'ciphertext', 'cookieKeyRevision'];
     const base64 = /^[A-Za-z0-9+/]+={0,2}$/;
@@ -4042,7 +4382,7 @@ app.post('/api/v1/sync/device-mode', async (req, res) => {
         ? req.body.cookiesEnabled
         : legacyEnabled);
     await store.setDeviceSyncEnabled(device.id, device.accountId, sessionsEnabled);
-    if (sessionsEnabled) await store.publishDeviceClients(device.accountId, device.id);
+    if (sessionsEnabled && limits.FEATURES.cloudBackupUploads) await store.publishDeviceClients(device.accountId, device.id);
     await store.setDeviceCookieSyncEnabledGlobal(device.id, device.accountId, cookiesEnabled);
     if (!cookiesEnabled) {
         const accountClients = await store.listClients(device.accountId);
@@ -4078,6 +4418,9 @@ app.post('/api/v1/sync/resolve', async (req, res) => {
     if (strategy !== 'cloud' && strategy !== 'device') {
         return res.status(400).json({ error: 'invalid_strategy', message: 'Geçerli bir senkronizasyon yönü seçin.' });
     }
+    if (strategy === 'device' && !limits.FEATURES.cloudBackupUploads) {
+        return res.status(403).json({ error: 'backup_uploads_closed', message: 'Yeni bulut yedek yüklemeleri geçici olarak kapalı. Mevcut yedekleri geri yükleyebilirsiniz.' });
+    }
 
     const accountId = device.accountId;
     const account = await store.getAccountById(accountId);
@@ -4104,6 +4447,7 @@ app.post('/api/v1/sync/clients/:clientId/publish', async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;
     if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    if (!limits.FEATURES.cloudBackupUploads) return res.status(403).json({ error: 'backup_uploads_closed', message: 'Yeni bulut yedek yüklemeleri geçici olarak kapalı. Mevcut yedekler erişilebilir.' });
     if (!device.syncEnabled) return res.status(409).json({ error: 'device_sync_disabled', message: 'Önce bu telefonda AI oturumu eşitlemesini açın.' });
     const body = req.body || {};
     const allowed = ['cookieSyncEnabled', 'cookieHandoff'];
@@ -4144,6 +4488,7 @@ app.post('/api/v1/sync/clients/:clientId/cookies/handoff/accept', async (req, re
     const device = requireDevice(req, res);
     if (!device) return;
     if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Önce hesabınıza giriş yapın.' });
+    if (!limits.FEATURES.cloudBackupUploads) return res.status(403).json({ error: 'backup_uploads_closed', message: 'Yeni bulut yedek yüklemeleri geçici olarak kapalı. Mevcut yedekler erişilebilir.' });
     const generation = Number(req.body?.generation);
     const updatedAt = Number(req.body?.updatedAt);
     if (!Number.isSafeInteger(generation) || generation < 0 || !Number.isSafeInteger(updatedAt) || updatedAt < 1) {
@@ -4170,6 +4515,7 @@ app.put('/api/v1/sync/clients/:clientId/cookies', async (req, res) => {
             message: 'Çerez eşitlemek için önce hesabınıza giriş yapın.'
         });
     }
+    if (!limits.FEATURES.cloudBackupUploads) return res.status(403).json({ error: 'backup_uploads_closed', message: 'Yeni bulut yedek yüklemeleri geçici olarak kapalı. Mevcut yedekler erişilebilir.' });
     if (!device.syncEnabled || !device.cookieSyncEnabled) {
         return res.status(409).json({
             error: 'device_cookie_sync_disabled',
@@ -4900,7 +5246,7 @@ app.get('/', async (req, res) => {
             opens: catalogue.links.reduce((sum, link) => sum + Number(link.openCount || 0), 0),
             revision: catalogue.revision
         },
-        registrationOpen: ALLOW_REGISTRATION,
+        registrationOpen: ALLOW_REGISTRATION && limits.FEATURES.registration,
         error: req.query.err ? String(req.query.err).substring(0, 200) : '',
         notice: req.query.ok ? String(req.query.ok).substring(0, 200) : '',
         storeWarning: store.durable ? '' :
@@ -4911,6 +5257,60 @@ app.get('/', async (req, res) => {
 function userPageRedirect(accountId, message, error = false) {
     return `/admin/users/${encodeURIComponent(accountId)}?${error ? 'err' : 'ok'}=${encodeURIComponent(message)}`;
 }
+
+app.get('/admin/policy', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    const csrf = ensureCsrfCookie(req, res, ctx.csrf);
+    const stored = await store.getProductPolicy();
+    panelHeaders(res);
+    res.send(panel.renderProductPolicy({ account: ctx.account, csrf,
+        policy: limits.policySnapshot(), revision: stored?.revision || 0,
+        registrationEnvEnabled: ALLOW_REGISTRATION,
+        error: req.query.err ? String(req.query.err).substring(0, 200) : '',
+        notice: req.query.ok ? String(req.query.ok).substring(0, 200) : '' }));
+});
+
+app.post('/admin/policy', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    const redirect = (message, error = false) => res.redirect(303,
+        `/admin/policy?${error ? 'err' : 'ok'}=${encodeURIComponent(message)}`);
+    if (!csrfOk(req, ctx)) return redirect('Form doğrulaması başarısız.', true);
+    const revision = Number(req.body?.revision);
+    if (!Number.isSafeInteger(revision) || revision < 0) return redirect('Ayar sürümü geçersiz.', true);
+    const parseLimit = (tier, key) => {
+        const raw = String(req.body?.[`${tier}_${key}`] ?? '');
+        return /^\d+$/.test(raw) ? Number(raw) : NaN;
+    };
+    const proposed = {
+        free: { maxDevices: parseLimit('free', 'maxDevices'), maxClients: parseLimit('free', 'maxClients'),
+            commandsPerDay: parseLimit('free', 'commandsPerDay') },
+        pro: { maxDevices: parseLimit('pro', 'maxDevices'), maxClients: parseLimit('pro', 'maxClients'),
+            commandsPerDay: parseLimit('pro', 'commandsPerDay') },
+        features: { registration: req.body?.registration === 'on',
+            guestEntry: req.body?.guestEntry === 'on',
+            cloudBackupUploads: req.body?.cloudBackupUploads === 'on' }
+    };
+    const policy = limits.validatePolicy(proposed);
+    if (!policy) return redirect('Kotalar geçersiz. Pro sınırları Free değerlerinden düşük olamaz.', true);
+    const saved = await store.setProductPolicy(policy, revision, ctx.account.id);
+    if (!saved) return redirect('Ayarlar başka bir oturumda değiştirildi. Sayfayı yenileyip yeniden deneyin.', true);
+    if (saved.revision > appliedProductPolicyRevision) {
+        limits.applyPolicy(saved.policy);
+        appliedProductPolicyRevision = saved.revision;
+    }
+    browsers.forEach((socket) => {
+        if (socket.readyState === 1) {
+            try { socket.send(JSON.stringify({ type: 'product_policy_changed' })); } catch (_) { /* Reconnect refreshes policy. */ }
+        }
+    });
+    addLog(null, 'Yönetici', null, 'Plan ve Özellik Ayarları', 'warning',
+        `Free ${policy.free.maxDevices}/${policy.free.maxClients}/${policy.free.commandsPerDay}; Pro ${policy.pro.maxDevices}/${policy.pro.maxClients}/${policy.pro.commandsPerDay}; kayıt ${policy.features.registration}; misafir ${policy.features.guestEntry}; yedek ${policy.features.cloudBackupUploads}`,
+        null, ctx.account.id);
+    console.log(`[Admin] Plan ve özellik ayarları güncellendi (sürüm ${saved.revision}).`);
+    return redirect('Plan ve özellik ayarları kaydedildi. Yeni sınırlar hemen uygulanıyor.');
+});
 
 app.get('/admin/users', async (req, res) => {
     const ctx = await requireOperator(req, res);
@@ -5072,6 +5472,7 @@ app.post('/admin/accounts/plan', async (req, res) => {
     await refreshRegistryCache();
 
     console.log(`[Admin] ${updated.email} planı: ${plan}`);
+    await notifyAccountPlanChanged(accountId);
     res.redirect(303, userPageRedirect(accountId, `Plan ${plan.toUpperCase()} olarak güncellendi.`));
 });
 
@@ -5556,6 +5957,45 @@ const PORT = process.env.PORT || 10000;
  * and nobody minds a row living an extra fifty minutes.
  */
 const AUDIT_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+const PLAY_RECONCILE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+async function reconcilePlaySubscriptions() {
+    if (!googlePlay.configured || !store) return;
+    try {
+        const rows = await store.listPlaySubscriptionsForRefresh(Date.now() - PLAY_RECONCILE_INTERVAL_MS, 100);
+        for (const row of rows) {
+            try {
+                await syncGooglePlaySubscription(row.purchaseToken, row.accountId, { refreshCache: false });
+            } catch (e) {
+                console.warn('[Billing] Subscription reconciliation failed:', String(e.message || '').split(':')[0]);
+            }
+        }
+        if (rows.length) {
+            await refreshRegistryCache();
+            for (const accountId of new Set(rows.map((row) => row.accountId))) {
+                await notifyAccountPlanChanged(accountId);
+            }
+        }
+    } catch (e) {
+        console.warn('[Billing] Reconciliation pass failed:', e.message);
+    }
+}
+
+// A Play entitlement can expire between six-hour verification passes. The
+// command gate uses planFor() immediately; this short sweep wakes the app so
+// the owner sees the Free selection prompt without first attempting a tool.
+const notifiedProExpiries = new Set();
+async function notifyExpiredProEntitlements() {
+    const now = Date.now();
+    for (const account of accountCache.values()) {
+        if (!account.planValidUntil || account.planValidUntil > now) continue;
+        const key = `${account.id}:${account.planValidUntil}`;
+        if (notifiedProExpiries.has(key)) continue;
+        notifiedProExpiries.add(key);
+        await notifyAccountPlanChanged(account.id);
+    }
+    if (notifiedProExpiries.size > 10000) notifiedProExpiries.clear();
+}
 
 async function sweepAudit() {
     try {
@@ -5581,12 +6021,26 @@ async function sweepAudit() {
 
 async function main() {
     store = await openStore();
+    const savedPolicy = await store.getProductPolicy();
+    if (savedPolicy) {
+        limits.applyPolicy(savedPolicy.policy);
+        appliedProductPolicyRevision = savedPolicy.revision;
+    }
     await refreshRegistryCache();
 
     const unclaimed = [...devices.values()].filter((d) => !d.accountId).length;
 
     const sweeper = setInterval(sweepAudit, AUDIT_SWEEP_INTERVAL_MS);
     if (sweeper.unref) sweeper.unref();
+    const billingReconciler = setInterval(reconcilePlaySubscriptions, PLAY_RECONCILE_INTERVAL_MS);
+    if (billingReconciler.unref) billingReconciler.unref();
+    const expiryNotifier = setInterval(() => notifyExpiredProEntitlements().catch((e) =>
+        console.warn('[Billing] Expiry notification failed:', e.message)), 30_000);
+    if (expiryNotifier.unref) expiryNotifier.unref();
+    // Also retry stale verification/acknowledgement shortly after a restart;
+    // waiting six hours would unnecessarily risk Play's acknowledgement window.
+    const initialBillingReconcile = setTimeout(reconcilePlaySubscriptions, 15_000);
+    if (initialBillingReconcile.unref) initialBillingReconcile.unref();
 
     server.listen(PORT, () => {
         console.log('=================================================');

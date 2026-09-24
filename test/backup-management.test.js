@@ -99,6 +99,7 @@ async function relay(run) {
     const secret='existing-credential-for-tests', newSecret='renewed-credential-for-tests', clientId='client-backup-test';
     const store=await openStore({stateFile});
     const a=await store.createAccount({email:'owner@test.invalid',passwordHash:'test',passwordSalt:'test'});
+    await store.setAccountPlan(a.id,'pro'); // Two active phones are intentional in these permission tests.
     const b=await store.createAccount({email:'foreign@test.invalid',passwordHash:'test',passwordSalt:'test'});
     for(const d of [main,backup,foreign]) {
         d.credential=d.id+'.device-secret-for-test';

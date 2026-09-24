@@ -64,6 +64,8 @@ Panel; genel sistem özeti, filtrelenebilir kullanıcı listesi, kullanıcı ayr
 ekranları, yönetici hesabı ve mevcut hızlı link kataloğunu ayrı bölümlerde
 gösterir. Bir yönetici kullanıcı planını Free/Pro olarak değiştirebilir, hesabı
 askıya alabilir ve panel oturumlarını kapatabilir.
+**Plan ve Özellikler** sayfasında Free/Pro cihaz, AI oturumu ve günlük komut
+kotaları ile kayıt, misafir girişi ve bulut yedeği yüklemesi yönetilebilir.
 
 Kullanıcı parolası sıfırlama işlemi yöneticinin kendi parolasını tekrar
 doğrulamasını ister. Hesapta uçtan uca şifreli çerez veya AI anahtar paketi
@@ -146,6 +148,17 @@ sıfırlanır, yani hesaplar da onunla gider.
 | Eşzamanlı SSE kanalı | 5 / istemci | Bellek şişmesi |
 | Günlük komut | 5.000 (ücretsiz plan) | Kötüye kullanım |
 | Cihaz sayısı | 1 (ücretsiz plan) | Hesap başına yayılma |
+
+Free planı 1 cihaz ve 8 AI oturumu, Pro planı 3 cihaz ve 50 AI oturumu
+ile başlar; ürün kotaları operatör panelinden değiştirilebilir. Pro süresi
+dolduğunda veya Free kotası düşürüldüğünde sınır aşılıyorsa kullanıcı Android
+uygulamasından etkin cihaz ve oturumları seçer. Seçim yapılana kadar AI
+komutları durur. Seçilmeyen kayıtlar, yerel profiller ve mevcut şifreli
+bulut yedekleri silinmez; hesap ve yedek yönetimi açık kalır. Pro yeniden
+etkinleşince duraklatılan bağlantılar tekrar kullanılabilir.
+
+Google Play Pro abonelik doğrulamasının kurulum adımları
+[Google Play Pro rehberinde](docs/google-play-pro.md) açıklanır.
 
 Komut kotası bilerek cömert: iş kullanıcının kendi telefonunda çalışıyor, röleye
 maliyeti birkaç yüz bayt yönlendirme. Tight bir komut sınırı maliyet kontrolü
