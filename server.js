@@ -4398,6 +4398,113 @@ app.post('/api/v1/account/password', async (req, res) => {
     res.json({ status: 'ok', message: 'Parola değişti.' });
 });
 
+// A recovery code protects a second wrapping of the same account data key.
+// The relay stores the encrypted wrapper and an account-bound verifier, never the code.
+app.post('/api/v1/account/recovery-kit', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Önce hesaba giriş yapın.' });
+    const account = await store.getAccountById(device.accountId);
+    if (!account || account.status !== 'active' || account.isAdmin) return res.status(403).json({ error: 'recovery_unavailable' });
+    const gate = limits.hit('login', `kit:${device.id}`);
+    if (!gate.allowed) return res.status(429).json({ error: 'too_many_attempts', message: 'Çok fazla deneme. Daha sonra tekrar deneyin.' });
+    const password = String(req.body?.password || '');
+    if (!await accounts.verifyPassword(password, account.passwordHash, account.passwordSalt)) {
+        return res.status(401).json({ error: 'bad_credentials', message: 'Mevcut parola hatalı.' });
+    }
+    const { kitId, codeHash, recoveryEnvelope, cookieKeyRevision } = req.body || {};
+    if (typeof kitId !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(kitId) ||
+        typeof codeHash !== 'string' || !/^[a-f0-9]{64}$/.test(codeHash) ||
+        !recoveryEnvelope || typeof recoveryEnvelope.iv !== 'string' ||
+        !/^[A-Za-z0-9_-]{16}$/.test(recoveryEnvelope.iv) ||
+        typeof recoveryEnvelope.ciphertext !== 'string' ||
+        !/^[A-Za-z0-9_-]{64}$/.test(recoveryEnvelope.ciphertext) ||
+        !Number.isSafeInteger(cookieKeyRevision) || cookieKeyRevision < 0) {
+        return res.status(400).json({ error: 'invalid_recovery_kit', message: 'Kurtarma kodu bilgileri geçersiz.' });
+    }
+    if (!await store.setAccountRecoveryKit(account.id, account.passwordHash, cookieKeyRevision,
+        kitId, codeHash, { iv: recoveryEnvelope.iv, ciphertext: recoveryEnvelope.ciphertext })) {
+        return res.status(409).json({ error: 'recovery_conflict', message: 'Hesap anahtarı değişti. İşlemi yeniden başlatın.' });
+    }
+    limits.reset('login', `kit:${device.id}`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ status: 'ok' });
+});
+
+// This ciphertext can be disclosed without revealing the data key: only the
+// 256-bit code opens it. Avoid logging the package or disclosing account status.
+app.post('/api/v1/account/recovery/prepare', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    const email = accounts.normaliseEmail(req.body?.email);
+    for (const key of [`recover-email:${email}`, `recover-ip:${limits.clientIp(req)}`]) {
+        const gate = limits.hit('login', key);
+        if (!gate.allowed) return res.status(429).json({ error: 'too_many_attempts', message: 'Çok fazla deneme. Daha sonra tekrar deneyin.' });
+    }
+    const account = await store.getAccountByEmail(email);
+    res.setHeader('Cache-Control', 'no-store');
+    if (!account || account.status !== 'active' || account.isAdmin ||
+        (device.accountId && device.accountId !== account.id) ||
+        !account.recoveryKitId || !account.recoveryCodeHash || !account.recoveryEnvelope) {
+        // Keep response status and shape identical for unknown or unenrolled
+        // accounts. The random package cannot decrypt.
+        return res.json({ accountId: randomUUID(), kitId: randomBytes(16).toString('base64url'),
+            recoveryEnvelope: { iv: randomBytes(12).toString('base64url'),
+                ciphertext: randomBytes(48).toString('base64url') } });
+    }
+    res.json({ accountId: account.id, kitId: account.recoveryKitId, recoveryEnvelope: account.recoveryEnvelope });
+});
+
+// Successful use consumes the code and disconnects old phones before this
+// phone is attached to the account.
+app.post('/api/v1/account/recovery/reset', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    const email = accounts.normaliseEmail(req.body?.email);
+    for (const key of [`recover-email:${email}`, `recover-ip:${limits.clientIp(req)}`]) {
+        const gate = limits.hit('login', key);
+        if (!gate.allowed) return res.status(429).json({ error: 'too_many_attempts', message: 'Çok fazla deneme. Daha sonra tekrar deneyin.' });
+    }
+    const account = await store.getAccountByEmail(email);
+    const { kitId, codeHash, next, cookieKeyEnvelope } = req.body || {};
+    const invalid = () => res.status(401).json({ error: 'recovery_failed', message: 'Kurtarma kodu geçersiz.' });
+    if (!account || account.status !== 'active' || account.isAdmin ||
+        (device.accountId && device.accountId !== account.id) ||
+        typeof kitId !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(kitId) ||
+        typeof codeHash !== 'string' || !/^[a-f0-9]{64}$/.test(codeHash) ||
+        account.recoveryKitId !== kitId || account.recoveryCodeHash !== codeHash ||
+        !account.recoveryEnvelope) return invalid();
+    const issue = accounts.passwordProblem(String(next || ''));
+    if (issue) return res.status(400).json({ error: 'weak_password', message: issue });
+    const validPart = (part) => part && /^[A-Za-z0-9+/]{16}$/.test(part.iv || '') &&
+        /^[A-Za-z0-9+/]{64}$/.test(part.ciphertext || '');
+    if (cookieKeyEnvelope?.version !== 2 || !validPart(cookieKeyEnvelope.strong) ||
+        cookieKeyEnvelope.legacy?.version !== 1 || !validPart(cookieKeyEnvelope.legacy)) {
+        return res.status(400).json({ error: 'invalid_key_envelope', message: 'Yedek anahtarı paketi geçersiz.' });
+    }
+    const envelope = {
+        version: 2,
+        strong: { iv: cookieKeyEnvelope.strong.iv, ciphertext: cookieKeyEnvelope.strong.ciphertext },
+        legacy: { version: 1, iv: cookieKeyEnvelope.legacy.iv, ciphertext: cookieKeyEnvelope.legacy.ciphertext }
+    };
+    const { passwordHash, passwordSalt } = await accounts.hashPassword(next);
+    if (!await store.consumeAccountRecoveryKit(account.id, kitId, codeHash,
+        account.cookieKeyRevision || 0, passwordHash, passwordSalt, envelope)) return invalid();
+    await store.revokeAccountSessions(account.id);
+    for (const other of await store.listDevices(account.id)) {
+        if (other.id === device.id) continue;
+        await store.setDeviceAccount(other.id, null);
+        const socket = browsers.get(other.id);
+        if (socket) try { socket.close(4403, 'Hesap kurtarıldı; cihazın bağlantısı kaldırıldı'); } catch (e) {}
+    }
+    if (!device.accountId) await linkDeviceToAccount(device, account);
+    else await refreshRegistryCache();
+    limits.reset('login', `recover-email:${email}`);
+    limits.reset('login', `recover-ip:${limits.clientIp(req)}`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(await accountSnapshot(devices.get(device.id)));
+});
+
 app.get('/api/v1/audit', async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;

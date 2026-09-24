@@ -8,6 +8,40 @@ const { randomUUID } = require('node:crypto');
 const { openStore } = require('../lib/store');
 
 for (const databaseUrl of ['', ...(process.env.TEST_DATABASE_URL ? [process.env.TEST_DATABASE_URL] : [])]) {
+    test(`${databaseUrl ? 'PostgreSQL' : 'file'}: account-bound recovery code is single-use and preserves encrypted data`, async () => {
+        const suffix = randomUUID();
+        const stateFile = path.join(os.tmpdir(), `recovery-safety-${suffix}.json`);
+        const store = await openStore({ stateFile, databaseUrl });
+        try {
+            const account = await store.createAccount({ email: `recovery-${suffix}@test.invalid`,
+                passwordHash: 'old', passwordSalt: 'salt' });
+            const envelope = { version: 2, strong: { iv: 'aaaaaaaaaaaaaaaa', ciphertext: 'a'.repeat(64) },
+                legacy: { version: 1, iv: 'bbbbbbbbbbbbbbbb', ciphertext: 'b'.repeat(64) } };
+            const recoveryEnvelope = { iv: 'aaaaaaaaaaaaaaaa', ciphertext: 'c'.repeat(64) };
+            assert.equal(await store.setAccountRecoveryKit(account.id, 'wrong', 0, 'kit', 'code', recoveryEnvelope), false);
+            assert.equal(await store.setAccountRecoveryKit(account.id, 'old', 0, 'kit', 'code', recoveryEnvelope), true);
+            assert.deepEqual((await store.getAccountById(account.id)).recoveryEnvelope, recoveryEnvelope);
+            assert.equal(await store.changePasswordWithCookieKey(account.id, 'old', 'operator-reset', 'salt', null, 0), false,
+                'yönetici etkin kodu ve veri anahtarını atlayarak parola sıfırlayamamalı');
+            assert.equal(await store.consumeAccountRecoveryKit(account.id, 'kit', 'wrong', 0,
+                'new', 'salt', envelope), false);
+            assert.equal((await store.getAccountById(account.id)).passwordHash, 'old');
+            assert.equal(await store.setAccountRecoveryKit(account.id, 'old', 0, 'next-kit', 'next-code', recoveryEnvelope), true);
+            assert.equal(await store.consumeAccountRecoveryKit(account.id, 'kit', 'code', 0,
+                'new', 'salt', envelope), false, 'yenilenen eski kod artık kullanılamamalı');
+            assert.equal(await store.consumeAccountRecoveryKit(account.id, 'next-kit', 'next-code', 0,
+                'new', 'salt', envelope), true);
+            assert.equal(await store.consumeAccountRecoveryKit(account.id, 'next-kit', 'next-code', 0,
+                'another', 'salt', envelope), false);
+            const recovered = await store.getAccountById(account.id);
+            assert.equal(recovered.passwordHash, 'new');
+            assert.equal(recovered.cookieKeyRevision, 1);
+            assert.deepEqual(recovered.cookieKeyEnvelope, envelope);
+            assert.equal(recovered.recoveryCodeHash, null);
+            assert.equal(recovered.recoveryEnvelope, null);
+        } finally { await store.close(); fs.rmSync(stateFile, { force: true }); }
+    });
+
     test(`${databaseUrl ? 'PostgreSQL' : 'file'}: password envelopes and explicit backup deletion are atomic`, async () => {
         const suffix = randomUUID();
         const stateFile = path.join(os.tmpdir(), `sync-safety-${suffix}.json`);

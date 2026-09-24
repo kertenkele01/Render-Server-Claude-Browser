@@ -923,6 +923,67 @@ test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async 
     device.close();
 });
 
+test('hesaba özel kurtarma kodu eski yedek anahtarını korur, cihazları ayırır ve tek kullanımlıdır', async () => {
+    const owner = await connectDevice('dev_recovery_owner', 'recovery-owner-secret-16');
+    const email = 'recovery-kit@test.com';
+    const oldPassword = 'eski-kurtarma-parolasi-123';
+    await appSignUp(owner, email, oldPassword);
+    const kitId = crypto.randomBytes(16).toString('base64url');
+    const codeHash = sha256('recovery-code-proof');
+    const recoveryEnvelope = {
+        iv: crypto.randomBytes(12).toString('base64url'),
+        ciphertext: crypto.randomBytes(48).toString('base64url')
+    };
+    const created = await appApi(owner, 'POST', '/api/v1/account/recovery-kit', {
+        password: oldPassword, kitId, codeHash, recoveryEnvelope, cookieKeyRevision: 0
+    });
+    assert.equal(created.status, 200, JSON.stringify(created.body));
+    assert.equal(JSON.stringify(created.body).includes(codeHash), false);
+
+    const nextPhone = await connectDevice('dev_recovery_new', 'recovery-new-secret-16');
+    const prepared = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/prepare', { email });
+    assert.equal(prepared.status, 200, JSON.stringify(prepared.body));
+    assert.equal(prepared.body.kitId, kitId);
+    assert.deepEqual(prepared.body.recoveryEnvelope, recoveryEnvelope);
+    assert.equal(JSON.stringify(prepared.body).includes(codeHash), false);
+    const absent = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/prepare',
+        { email: 'someone-else@test.com' });
+    assert.equal(absent.status, 200);
+    assert.ok(absent.body.recoveryEnvelope);
+    assert.notEqual(absent.body.accountId, prepared.body.accountId);
+    const envelope = {
+        version: 2,
+        strong: { iv: Buffer.alloc(12).toString('base64'), ciphertext: Buffer.alloc(48, 1).toString('base64') },
+        legacy: { version: 1, iv: Buffer.alloc(12, 2).toString('base64'), ciphertext: Buffer.alloc(48, 3).toString('base64') }
+    };
+    const request = { email, next: 'yeni-kurtarma-parolasi-123', kitId, codeHash,
+        cookieKeyEnvelope: envelope };
+    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset',
+        { ...request, codeHash: sha256('wrong-code') })).status, 401);
+    const other = await connectDevice('dev_recovery_other', 'recovery-other-secret-16');
+    const otherEmail = 'other-recovery@test.com';
+    await appSignUp(other, otherEmail, 'other-recovery-password-123');
+    const otherKitId = crypto.randomBytes(16).toString('base64url');
+    const otherHash = sha256('other-recovery-code-proof');
+    assert.equal((await appApi(other, 'POST', '/api/v1/account/recovery-kit', {
+        password: 'other-recovery-password-123', kitId: otherKitId,
+        codeHash: otherHash, recoveryEnvelope, cookieKeyRevision: 0
+    })).status, 200);
+    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset',
+        { ...request, email: otherEmail, kitId: otherKitId })).status, 401);
+    const recovered = await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset', request);
+    assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+    assert.equal(recovered.body.linked, true);
+    assert.equal(recovered.body.cookieKeyRevision, 1);
+    assert.equal((await appApi(nextPhone, 'GET', '/api/v1/sync/key-envelope', null,
+        { 'x-cookie-key-envelope-version': '2' })).body.envelope.strong.ciphertext,
+        envelope.strong.ciphertext);
+    assert.equal((await appApi(nextPhone, 'POST', '/api/v1/account/recovery/reset', request)).status, 401);
+    assert.equal((await appApi(owner, 'GET', '/api/v1/account')).body.linked, false);
+    assert.equal((await appApi(owner, 'POST', '/api/v1/login', { email, password: oldPassword })).status, 401);
+    owner.close(); nextPhone.close(); other.close();
+});
+
 test('kimlik bilgisi sorgu dizesinden kabul edilmez', async () => {
     const res = await fetch(`${BASE}/tools/browser_get_markdown?token=cli_mcp_1.istemci-sirri-uzun-yeterince`);
     assert.equal(res.status, 401, 'sorgu dizesindeki anahtar kabul edildi');
