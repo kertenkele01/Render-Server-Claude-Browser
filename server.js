@@ -6,7 +6,7 @@ const { randomUUID, createHash, timingSafeEqual, randomInt, randomBytes } = requ
 const fs = require('fs');
 const path = require('path');
 
-const { openStore } = require('./lib/store');
+const { openStore, recoveryCodeVerifier } = require('./lib/store');
 const accounts = require('./lib/auth');
 const panel = require('./lib/panel');
 const oauth = require('./lib/oauth');
@@ -4842,7 +4842,7 @@ app.post('/api/v1/account/recovery/reset', async (req, res) => {
         (device.accountId && device.accountId !== account.id) ||
         typeof kitId !== 'string' || !/^[A-Za-z0-9_-]{22}$/.test(kitId) ||
         typeof codeHash !== 'string' || !/^[a-f0-9]{64}$/.test(codeHash) ||
-        account.recoveryKitId !== kitId || account.recoveryCodeHash !== codeHash ||
+        account.recoveryKitId !== kitId || account.recoveryCodeHash !== recoveryCodeVerifier(codeHash) ||
         !account.recoveryEnvelope) return invalid();
     const issue = accounts.passwordProblem(String(next || ''));
     if (issue) return res.status(400).json({ error: 'weak_password', message: issue });

@@ -4,8 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
-const { openStore } = require('../lib/store');
+const { createHash, randomUUID } = require('node:crypto');
+const { openStore, recoveryCodeVerifier } = require('../lib/store');
 
 for (const databaseUrl of ['', ...(process.env.TEST_DATABASE_URL ? [process.env.TEST_DATABASE_URL] : [])]) {
     test(`${databaseUrl ? 'PostgreSQL' : 'file'}: account-bound recovery code is single-use and preserves encrypted data`, async () => {
@@ -20,9 +20,14 @@ for (const databaseUrl of ['', ...(process.env.TEST_DATABASE_URL ? [process.env.
             const recoveryEnvelope = { iv: 'aaaaaaaaaaaaaaaa', ciphertext: 'c'.repeat(64) };
             assert.equal(await store.setAccountRecoveryKit(account.id, 'wrong', 0, 'kit', 'code', recoveryEnvelope), false);
             assert.equal(await store.setAccountRecoveryKit(account.id, 'old', 0, 'kit', 'code', recoveryEnvelope), true);
-            assert.deepEqual((await store.getAccountById(account.id)).recoveryEnvelope, recoveryEnvelope);
+            const savedKit = await store.getAccountById(account.id);
+            assert.deepEqual(savedKit.recoveryEnvelope, recoveryEnvelope);
+            assert.equal(savedKit.recoveryCodeHash, recoveryCodeVerifier('code'));
+            assert.notEqual(savedKit.recoveryCodeHash, 'code', 'veritabanındaki değer doğrudan kurtarma kanıtı olmamalı');
             assert.equal(await store.changePasswordWithCookieKey(account.id, 'old', 'operator-reset', 'salt', null, 0), false,
                 'yönetici etkin kodu ve veri anahtarını atlayarak parola sıfırlayamamalı');
+            assert.equal(await store.consumeAccountRecoveryKit(account.id, 'kit', savedKit.recoveryCodeHash, 0,
+                'new', 'salt', envelope), false, 'veritabanındaki doğrulayıcı kanıt olarak kabul edilmemeli');
             assert.equal(await store.consumeAccountRecoveryKit(account.id, 'kit', 'wrong', 0,
                 'new', 'salt', envelope), false);
             assert.equal((await store.getAccountById(account.id)).passwordHash, 'old');
@@ -39,6 +44,30 @@ for (const databaseUrl of ['', ...(process.env.TEST_DATABASE_URL ? [process.env.
             assert.deepEqual(recovered.cookieKeyEnvelope, envelope);
             assert.equal(recovered.recoveryCodeHash, null);
             assert.equal(recovered.recoveryEnvelope, null);
+        } finally { await store.close(); fs.rmSync(stateFile, { force: true }); }
+    });
+
+    if (!databaseUrl) test('file: existing recovery codes migrate without becoming replayable', async () => {
+        const stateFile = path.join(os.tmpdir(), `recovery-migration-${randomUUID()}.json`);
+        const id = randomUUID();
+        const proof = createHash('sha256').update('legacy-recovery-proof').digest('hex');
+        const legacy = { id, email: 'legacy-recovery@test.invalid', passwordHash: 'old', passwordSalt: 'salt',
+            status: 'active', recoveryKitId: 'kit', recoveryCodeHash: proof,
+            recoveryEnvelope: { iv: 'aaaaaaaaaaaaaaaa', ciphertext: 'c'.repeat(64) } };
+        fs.writeFileSync(stateFile, JSON.stringify({ version: 11, accounts: { [id]: legacy } }));
+        let store = await openStore({ stateFile, databaseUrl: '' });
+        try {
+            assert.equal((await store.getAccountById(id)).recoveryCodeHash, recoveryCodeVerifier(proof));
+            assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).accounts[id].recoveryCodeHash,
+                recoveryCodeVerifier(proof), 'migration must be durable before requests are served');
+            await store.close();
+            store = await openStore({ stateFile, databaseUrl: '' });
+            assert.equal((await store.getAccountById(id)).recoveryCodeHash, recoveryCodeVerifier(proof),
+                'restarting must not hash a migrated code again');
+            const envelope = { version: 2, strong: { iv: 'aaaaaaaaaaaaaaaa', ciphertext: 'a'.repeat(64) },
+                legacy: { version: 1, iv: 'bbbbbbbbbbbbbbbb', ciphertext: 'b'.repeat(64) } };
+            assert.equal(await store.consumeAccountRecoveryKit(id, 'kit', proof, 0, 'new', 'salt', envelope), true,
+                'existing recovery code must still work');
         } finally { await store.close(); fs.rmSync(stateFile, { force: true }); }
     });
 
