@@ -3618,7 +3618,11 @@ app.post('/api/v1/billing/google-play/verify', async (req, res) => {
         };
         const key = String(e.message || '').split(':')[0];
         const [status, message] = known[key] || [502, 'Google Play satın alma bilgisi doğrulanamadı. Biraz sonra tekrar deneyin.'];
-        console.warn('[Billing] Purchase verification failed:', key);
+        // Keep Google's free-form error text (which can contain identifiers) out
+        // of logs, but expose the HTTP status needed to distinguish permission,
+        // package and transient failures during billing setup.
+        const apiStatus = /^google_play_api_failed:(\d{3}):/.exec(String(e.message || ''))?.[1];
+        console.warn('[Billing] Purchase verification failed:', key, apiStatus ? `HTTP ${apiStatus}` : '');
         res.status(status).json({ error: key || 'purchase_verification_failed', message });
     }
 });
