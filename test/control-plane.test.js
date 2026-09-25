@@ -945,6 +945,15 @@ test('hesaba özel tek kurtarma kodu parolayı sıfırlar, yedek anahtarını ko
     const email = 'recovery-kit@test.com';
     const oldPassword = 'eski-kurtarma-parolasi-123';
     await appSignUp(owner, email, oldPassword);
+    const wrongPreparation = await appApi(owner, 'POST', '/api/v1/account/recovery-kit/prepare',
+        { password: 'yanlis-kurtarma-parolasi' });
+    assert.equal(wrongPreparation.status, 401, JSON.stringify(wrongPreparation.body));
+    assert.equal(wrongPreparation.body.envelope, undefined,
+        'yanlış parola kurtarma kodu hazırlamak için anahtar paketi vermemeli');
+    const correctPreparation = await appApi(owner, 'POST', '/api/v1/account/recovery-kit/prepare',
+        { password: oldPassword });
+    assert.equal(correctPreparation.status, 200, JSON.stringify(correctPreparation.body));
+    assert.equal(correctPreparation.body.revision, 0);
     const kitId = crypto.randomBytes(16).toString('base64url');
     const codeHash = sha256('recovery-code-proof');
     const recoveryEnvelope = {

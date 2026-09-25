@@ -4750,6 +4750,26 @@ app.post('/api/v1/account/password', async (req, res) => {
 
 // A recovery code protects a second wrapping of the same account data key.
 // The relay stores the encrypted wrapper and an account-bound verifier, never the code.
+app.post('/api/v1/account/recovery-kit/prepare', async (req, res) => {
+    const device = requireDevice(req, res);
+    if (!device) return;
+    if (!device.accountId) return res.status(403).json({ error: 'not_linked', message: 'Önce hesaba giriş yapın.' });
+    const account = await store.getAccountById(device.accountId);
+    if (!account || account.status !== 'active' || account.isAdmin) {
+        return res.status(403).json({ error: 'recovery_unavailable' });
+    }
+    const limitKey = `kit-prepare:${device.id}`;
+    const gate = limits.hit('login', limitKey);
+    if (!gate.allowed) return res.status(429).json({ error: 'too_many_attempts', message: 'Çok fazla deneme. Daha sonra tekrar deneyin.' });
+    const password = String(req.body?.password || '');
+    if (!await accounts.verifyPassword(password, account.passwordHash, account.passwordSalt)) {
+        return res.status(401).json({ error: 'bad_credentials', message: 'Mevcut parola hatalı.' });
+    }
+    limits.reset('login', limitKey);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ envelope: account.cookieKeyEnvelope || null, revision: account.cookieKeyRevision || 0 });
+});
+
 app.post('/api/v1/account/recovery-kit', async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;
