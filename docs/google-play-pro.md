@@ -5,8 +5,8 @@ Console ve sunucu tarafında aşağıdaki tek seferlik kurulum yapılmalıdır.
 
 ## Ürün modeli
 
-- Paket adı: `com.aistudio.aibrowser.qyzkdf`
-- Abonelik ürün kimliği: `ai_browser_pro`
+- Paket adı: `com.kertenkele.tabrove`
+- Abonelik ürün kimliği: `tabrove_pro`
 - Aynı abonelik altında önerilen iki temel plan: `monthly` ve `yearly`
 - Free ve Pro arasındaki tek farklar günlük komut, hesaba bağlı cihaz ve yeni
   AI bağlantısı sınırlarıdır. Güvenlik izinleri ve diğer ürün özellikleri her
@@ -14,6 +14,27 @@ Console ve sunucu tarafında aşağıdaki tek seferlik kurulum yapılmalıdır.
 
 Ürün ve temel planlar Play Console'da etkinleştirilmelidir. Fiyat ve dönem
 uygulamaya Play tarafından gelir; uygulamada sabit fiyat bulunmaz.
+
+## Play Console'da satışa açma
+
+1. Play Console'da **Ayarlar → Ödemeler profili** bölümünü tamamlayın.
+2. Gerçek yükleme anahtarıyla imzalanmış `com.kertenkele.tabrove` uygulama
+   paketini bir iç test sürümüne yükleyin. Projedeki debug anahtarıyla alınmış
+   yedek release derlemesini dağıtım için kullanmayın. İlk kez oluştururken
+   `scripts/create-play-upload-key.ps1`, sonraki paketler için
+   `scripts/build-play-bundle.ps1` kullanılabilir. `my-upload-key.jks` ve
+   `.upload-key-password.txt` dosyalarını birlikte güvenli bir yere yedekleyin;
+   bunlar depoya eklenmez. Yüklenecek dosya
+   `app/build/outputs/bundle/release/app-release.aab` konumundadır.
+3. **Google Play ile para kazanma → Ürünler → Abonelikler** bölümünde
+   `tabrove_pro` kimlikli aboneliği oluşturun. Kullanıcıya görünen adı
+   `Tabrove Pro` olabilir.
+4. Bu aboneliğin altında `monthly` (aylık) ve `yearly` (yıllık) otomatik
+   yenilenen temel planları oluşturun; satılacak ülkeleri ve fiyatları seçip
+   planları etkinleştirin.
+5. Sunucu kimliğini ve gerçek zamanlı bildirimleri aşağıdaki gibi kurun.
+   Bunlar tamamlanmadan uygulama satın alma seçeneklerini göstermez veya
+   satın almayı Pro yetkisine dönüştürmez.
 
 ## Sunucu kimliği
 

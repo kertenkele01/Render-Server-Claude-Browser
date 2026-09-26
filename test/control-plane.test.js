@@ -400,6 +400,34 @@ test('parola uygulamadan değiştirilebilir', async () => {
     otherDevice.close();
 });
 
+test('parola değiştirme denemeleri hesap bazında sınırlanır', async () => {
+    const device = await connectDevice('dev_parola_limit', 'cihaz-sirri-parola-limit-16');
+    await appSignUp(device, 'parola-limit@test.com', 'mevcut-parola-yeterince-uzun');
+
+    for (let i = 0; i < 10; i++) {
+        const wrong = await appApi(device, 'POST', '/api/v1/account/password', {
+            current: `yanlis-parola-${i}`, next: 'yeni-parola-yeterince-uzun'
+        });
+        assert.equal(wrong.status, 401);
+    }
+    const blocked = await appApi(device, 'POST', '/api/v1/account/password', {
+        current: 'mevcut-parola-yeterince-uzun', next: 'yeni-parola-yeterince-uzun'
+    });
+    assert.equal(blocked.status, 429);
+    assert.equal(blocked.body.error, 'too_many_attempts');
+    assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+
+    // A targeted account lockout must not consume another account's budget.
+    const other = await connectDevice('dev_parola_limit_diger', 'cihaz-sirri-parola-limit-diger');
+    await appSignUp(other, 'parola-limit-diger@test.com', 'diger-mevcut-parola-uzun');
+    const changed = await appApi(other, 'POST', '/api/v1/account/password', {
+        current: 'diger-mevcut-parola-uzun', next: 'diger-yeni-parola-yeterince-uzun'
+    });
+    assert.equal(changed.status, 200);
+    device.close();
+    other.close();
+});
+
 // --- isolation -------------------------------------------------------------
 
 test('bir hesap diğerinin verisini hiçbir uçtan göremez', async () => {

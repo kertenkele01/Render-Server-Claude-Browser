@@ -3540,6 +3540,11 @@ function requireDevice(req, res) {
     return device;
 }
 
+/** Bound targeted guesses and repeated password work across all account devices. */
+function passwordChangeGate(accountId) {
+    return limits.hit('passwordChange', accountId);
+}
+
 async function syncGooglePlaySubscription(purchaseToken, expectedAccountId = null, { refreshCache = true } = {}) {
     if (!googlePlay.configured) throw new Error('google_play_not_configured');
     const verified = await googlePlay.verifySubscription(purchaseToken);
@@ -4693,6 +4698,12 @@ app.post('/api/v1/account/password', async (req, res) => {
     }
 
     const account = await store.getAccountById(device.accountId);
+    if (!account) return res.status(403).json({ error: 'not_linked' });
+    const gate = passwordChangeGate(account.id);
+    if (!gate.allowed) {
+        res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+        return res.status(429).json({ error: 'too_many_attempts', message: 'Çok fazla deneme. Daha sonra tekrar deneyin.' });
+    }
     const current = String((req.body && req.body.current) || '');
     const next = String((req.body && req.body.next) || '');
 
@@ -5889,6 +5900,12 @@ app.post('/account/password', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
     if (!csrfOk(req, ctx)) return res.redirect(303, '/account?err=' + encodeURIComponent('Form doğrulaması başarısız.'));
+
+    const gate = passwordChangeGate(ctx.account.id);
+    if (!gate.allowed) {
+        res.setHeader('Retry-After', String(gate.retryAfterSeconds));
+        return res.redirect(303, '/account?err=' + encodeURIComponent('Çok fazla deneme. Daha sonra tekrar deneyin.'));
+    }
 
     const current = String((req.body && req.body.current) || '');
     const next = String((req.body && req.body.next) || '');

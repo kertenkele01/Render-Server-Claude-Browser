@@ -27,7 +27,7 @@ test('Play aboneliği hesap sınırını aşmadan ve bildirimleri iki kez işlem
             tokenHash: 'a'.repeat(64),
             purchaseToken: 'play-token-kept-server-side',
             accountId: first.id,
-            productId: 'ai_browser_pro',
+            productId: 'tabrove_pro',
             basePlanId: 'monthly',
             state: 'SUBSCRIPTION_STATE_ACTIVE',
             active: true,
