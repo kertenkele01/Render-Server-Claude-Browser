@@ -1,4 +1,4 @@
-# Google Play Pro kurulumu
+# Google Play Plus kurulumu
 
 Uygulamadaki satın alma akışı hazırdır; gerçek ödeme alabilmesi için Play
 Console ve sunucu tarafında aşağıdaki tek seferlik kurulum yapılmalıdır.
@@ -6,14 +6,33 @@ Console ve sunucu tarafında aşağıdaki tek seferlik kurulum yapılmalıdır.
 ## Ürün modeli
 
 - Paket adı: `com.kertenkele.tabrove`
-- Abonelik ürün kimliği: `tabrove_pro`
-- Aynı abonelik altında önerilen iki temel plan: `monthly` ve `yearly`
-- Free ve Pro arasındaki tek farklar günlük komut, hesaba bağlı cihaz ve yeni
+- Plus abonelik ürün kimliği: `tabrove_plus`
+- Plus temel planları: `monthly` (P1M) ve `yearly` (P1Y).
+- Ayrı Pro ürünü `tabrove_pro` şimdilik uygulamada satışa bağlı değildir;
+  Pro sayfasında “Yakında” gösterilir. Pro satın alımları Plus olarak doğrulanmaz.
+- Free ve Plus arasındaki tek farklar günlük komut, hesaba bağlı cihaz ve yeni
   AI bağlantısı sınırlarıdır. Güvenlik izinleri ve diğer ürün özellikleri her
   iki planda da aynıdır.
 
 Ürün ve temel planlar Play Console'da etkinleştirilmelidir. Fiyat ve dönem
 uygulamaya Play tarafından gelir; uygulamada sabit fiyat bulunmaz.
+
+## Yönetici tarafından süreli plan atama
+
+Admin panelinde **Kullanıcılar → Yönet → Plan Yönetimi** üzerinden Free, Plus
+veya Pro atanabilir. Süre için **Sınırsız**, **Gün**, **Ay** ya da **Yıl** seçilir;
+süreli seçimlerde adet girilir (örneğin 7 gün, 3 ay veya 1 yıl). Kaydetme yeni
+süreyi o andan başlatır; eski sürenin üstüne eklemez. Ay ve yıl takvim süresidir,
+UTC üzerinden hesaplanır ve ay sonu gerekirse son geçerli güne yuvarlanır.
+Bitiş tarihi panelde Türkiye saatiyle gösterilir.
+
+Süre dolunca manuel ücretli hak sona erer. Aktif Google Play aboneliği varsa
+Plus erişimi korunur, yoksa Free limitleri uygulanır. Free ataması aktif Play
+aboneliğini iptal etmez. Cihazlar, AI bağlantıları ve yedekler silinmez; Free
+limitini aşan bağlantılar mevcut seçim akışıyla duraklatılır. Sınırsız atamaların
+bitiş tarihi yoktur; mevcut süresiz manuel üyelikler de aynı şekilde korunur.
+Plan ve son kullanma tarihi birlikte PostgreSQL'de veya yerel dosya deposunda
+saklanır. Sunucu kapalıyken biten süre açılışta da geçerli olmaz.
 
 ## Play Console'da satışa açma
 
@@ -27,14 +46,18 @@ uygulamaya Play tarafından gelir; uygulamada sabit fiyat bulunmaz.
    bunlar depoya eklenmez. Yüklenecek dosya
    `app/build/outputs/bundle/release/app-release.aab` konumundadır.
 3. **Google Play ile para kazanma → Ürünler → Abonelikler** bölümünde
-   `tabrove_pro` kimlikli aboneliği oluşturun. Kullanıcıya görünen adı
-   `Tabrove Pro` olabilir.
+   `tabrove_plus` kimlikli aboneliği kullanın. Kullanıcıya görünen adı
+   `Tabrove Plus` olmalıdır. Sunucuda `GOOGLE_PLAY_PLUS_SUBSCRIPTION_ID=tabrove_plus`
+   ve `GOOGLE_PLAY_PRO_SUBSCRIPTION_ID=tabrove_pro` değerlerini kullanıp güncel
+   sunucu sürümünü yayınlayın. Eski ortak `GOOGLE_PLAY_SUBSCRIPTION_ID` ayarı
+   artık kullanılmaz. Aynı servis hesabı JSON anahtarı iki ürün için de kullanılır;
+   yeni abonelik oluşturmak yeni bir servis hesabı anahtarı gerektirmez.
 4. Bu aboneliğin altında `monthly` (aylık) ve `yearly` (yıllık) otomatik
    yenilenen temel planları oluşturun; satılacak ülkeleri ve fiyatları seçip
    planları etkinleştirin.
 5. Sunucu kimliğini ve gerçek zamanlı bildirimleri aşağıdaki gibi kurun.
    Bunlar tamamlanmadan uygulama satın alma seçeneklerini göstermez veya
-   satın almayı Pro yetkisine dönüştürmez.
+   satın almayı Plus erişimine dönüştürmez.
 
 ## Sunucu kimliği
 
@@ -75,6 +98,6 @@ doğrular. Bildirim kaybolsa bile kayıtlı abonelikler belirli aralıklarla Pla
 4. Aynı satın alma jetonunun farklı bir uygulama hesabına bağlanamadığını ve
    iptal/süre bitiminden sonra Free sınırlarının döndüğünü doğrulayın.
 
-Satın alma yalnızca Google Play sunucusunda doğrulandıktan sonra Pro'yu açar.
+Satın alma yalnızca Google Play sunucusunda doğrulandıktan sonra Plus'ı açar.
 İstemcideki “satın alındı” sonucu tek başına yetki vermez; ilk satın almayı röle
 onaylar, yenileme ve iptalleri Play bildirimleriyle izler.

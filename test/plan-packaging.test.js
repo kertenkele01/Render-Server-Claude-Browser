@@ -4,17 +4,22 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PLANS, planFor, freeSelectionStatus } = require('../lib/limits');
 
-test('Free ve Pro yalnızca komut, cihaz ve yeni AI bağlantısı sınırlarında ayrılır', () => {
-    const differing = Object.keys(PLANS.free).filter((key) => PLANS.free[key] !== PLANS.pro[key]);
-    assert.deepEqual(
-        differing.sort(),
-        ['commandsPerDay', 'label', 'maxClients', 'maxDevices'].sort()
-    );
-    assert.equal(PLANS.free.maxSseChannelsPerClient, PLANS.pro.maxSseChannelsPerClient);
-    assert.equal(PLANS.free.auditRetentionDays, PLANS.pro.auditRetentionDays);
+test('Free Plus Pro relay sınırlarında güvenlik özelliklerini ayırmaz', () => {
+    for (const tier of ['plus', 'pro']) {
+        const differing = Object.keys(PLANS.free).filter((key) => PLANS.free[key] !== PLANS[tier][key]);
+        assert.deepEqual(
+            differing.sort(),
+            ['commandsPerDay', 'label', 'maxClients', 'maxDevices'].sort()
+        );
+        assert.equal(PLANS.free.maxSseChannelsPerClient, PLANS[tier].maxSseChannelsPerClient);
+        assert.equal(PLANS.free.auditRetentionDays, PLANS[tier].auditRetentionDays);
+    }
+    assert.deepEqual([PLANS.plus.commandsPerDay, PLANS.plus.maxDevices, PLANS.plus.maxClients], [100000, 3, 50]);
+    assert.deepEqual([PLANS.pro.commandsPerDay, PLANS.pro.maxDevices, PLANS.pro.maxClients], [1000000, 20, 200]);
 });
 
 test('süresi dolmuş Play önbelleği ücretli sınırları uzatmaz', () => {
+    assert.equal(planFor({ plan: 'plus', planValidUntil: Date.now() - 1 }), PLANS.free);
     assert.equal(
         planFor({ plan: 'pro', planValidUntil: Date.now() - 1 }),
         PLANS.free

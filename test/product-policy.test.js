@@ -8,12 +8,15 @@ const path = require('node:path');
 const { openStore, SCHEMA } = require('../lib/store');
 const limits = require('../lib/limits');
 
-test('plan ayarları sıkı doğrulanır ve Pro Free altında olamaz', () => {
+test('plan ayarları sıkı doğrulanır ve Free Plus Pro hiyerarşisi korunur', () => {
     const valid = limits.policySnapshot();
     assert.deepEqual(limits.validatePolicy(valid), valid);
     assert.equal(limits.validatePolicy({ ...valid, free: { ...valid.free, maxDevices: 0 } }), null);
     assert.equal(limits.validatePolicy({ ...valid, free: { ...valid.free, maxDevices: 101 } }), null);
     assert.equal(limits.validatePolicy({ ...valid, pro: { ...valid.pro, maxClients: 1 } }), null);
+    assert.equal(limits.validatePolicy({ ...valid, plus: { ...valid.plus, maxClients: 1 } }), null);
+    assert.equal(limits.validatePolicy({ ...valid, pro: { ...valid.pro, maxClients: valid.plus.maxClients - 1 } }), null);
+    assert.equal(limits.validatePolicy({ ...valid, plus: null }), null);
     assert.equal(limits.validatePolicy({ ...valid, features: { ...valid.features, guestEntry: 'false' } }), null);
     assert.equal(limits.validatePolicy({ ...valid, free: { ...valid.free, auditRetentionDays: 1 } }), null);
 });

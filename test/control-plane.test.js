@@ -368,7 +368,7 @@ test('parola uygulamadan değiştirilebilir', async () => {
     const passwordAccount = status.accounts.find((a) => a.email === 'parola@test.com');
     assert.ok(passwordAccount);
     assert.equal((await form(operator, '/admin/accounts/plan', {
-        accountId: passwordAccount.id, plan: 'pro'
+        accountId: passwordAccount.id, plan: 'plus'
     })).status, 303);
 
     const otherDevice = await connectDevice('dev_parola_2', 'cihaz-sirri-parola-iki');
@@ -547,7 +547,7 @@ test('aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendir
     const account = status.accounts.find((a) => a.email === email);
     assert.ok(account, 'çoklu cihaz hesabı operatör görünümünde yok');
     const promoted = await form(operator, '/admin/accounts/plan', {
-        accountId: account.id, plan: 'pro'
+        accountId: account.id, plan: 'plus'
     });
     assert.equal(promoted.status, 303);
 
@@ -683,7 +683,7 @@ test('şifreli mevcut token ikinci telefondan alınır ve OAuth aynı tokenı te
     t.after(() => first.close());
     const account = await appSignUp(first, email, password);
     const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
-    assert.equal((await form(operator, '/admin/accounts/plan', { accountId: account.accountId, plan: 'pro' })).status, 303);
+    assert.equal((await form(operator, '/admin/accounts/plan', { accountId: account.accountId, plan: 'plus' })).status, 303);
     const second = await connectDevice('dev_credential_backup', 'credential-backup-device-secret');
     t.after(() => second.close());
     assert.equal((await appApi(second, 'POST', '/api/v1/login', { email, password })).status, 200);
@@ -784,7 +784,7 @@ test('yedekte oluşturulan oturum ve yerel çerezler tek seferlik paketle ana ci
     const status = await (await visit(operator, '/api/status')).json();
     const account = status.accounts.find(a => a.email === email);
     assert.ok(account);
-    assert.equal((await form(operator, '/admin/accounts/plan', { accountId: account.id, plan: 'pro' })).status, 303);
+    assert.equal((await form(operator, '/admin/accounts/plan', { accountId: account.id, plan: 'plus' })).status, 303);
 
     const backup = await connectDevice('dev_devir_backup', 'devir-backup-cihaz-sirri', [
         { clientId, secret, name: 'Yedekteki Oturum' }
@@ -1340,7 +1340,7 @@ test('giriş yapmış yedek ana cihazda sonradan eklenen oturumu ve şifreli pak
     t.after(() => main.close());
     const account = await appSignUp(main, email, password);
     const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
-    await form(operator, '/admin/accounts/plan', { accountId: account.accountId, plan: 'pro' });
+    await form(operator, '/admin/accounts/plan', { accountId: account.accountId, plan: 'plus' });
     const backup = await connectDevice('dev_late_backup', 'late-backup-device-secret');
     t.after(() => backup.close());
     assert.equal((await appApi(backup, 'POST', '/api/v1/login', { email, password })).status, 200);
@@ -1393,6 +1393,94 @@ test('giriş yapmış yedek ana cihazda sonradan eklenen oturumu ve şifreli pak
     assert.equal(JSON.stringify(inventory).includes('session=test-baseline'), false);
 });
 
+test('Free Plus Pro are separate operator choices and account catalogues preserve Plus billing', async (t) => {
+    const device = await connectDevice('dev_three_tiers', 'three-tier-device-secret');
+    t.after(() => device.close());
+    const signedUp = await appSignUp(device, 'three-tiers@test.com', 'three-tier-account-password');
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const policyPage = await visit(operator, '/admin/policy');
+    const policyHtml = await policyPage.text();
+    assert.match(policyHtml, /Plus planı/);
+    assert.match(policyHtml, /name="plus_commandsPerDay"/);
+    for (const [plan, commands, devices, clients] of [
+        ['free', 5000, 1, 8], ['plus', 100000, 3, 50], ['pro', 1000000, 20, 200]
+    ]) {
+        const changed = await form(operator, '/admin/accounts/plan', { accountId: signedUp.accountId, plan });
+        assert.equal(changed.status, 303);
+        const state = (await appApi(device, 'GET', '/api/v1/account')).body;
+        assert.equal(state.plan.id, plan);
+        assert.equal(state.planCatalogVersion, 2);
+        assert.deepEqual(Object.keys(state.plans), ['free', 'plus', 'pro']);
+        assert.deepEqual([state.quota.commandsPerDay, state.quota.maxDevices, state.quota.maxClients],
+            [commands, devices, clients]);
+        assert.equal(state.upgrade.commandsPerDay, 100000, 'legacy upgrade endpoint must remain Plus');
+        assert.equal(state.billing.planId, 'plus');
+        assert.equal(state.billing.productId, 'tabrove_plus');
+        assert.equal(state.billing.products.plus.name, 'Tabrove Plus');
+        assert.equal(state.billing.products.pro.productId, 'tabrove_pro');
+        assert.equal(state.billing.products.pro.purchasable, false);
+        const filtered = await visit(operator, `/admin/users?q=three-tiers%40test.com&plan=${plan}`);
+        const html = await filtered.text();
+        assert.match(html, /three-tiers@test\.com/);
+        assert.match(html, /option value="plus"/);
+    }
+});
+
+test('operator grants accept counted durations, expose the deadline and reject invalid periods without changes', async (t) => {
+    const health = await (await fetch(BASE + '/healthz')).json();
+    assert.equal(health.planCatalogVersion, 2);
+    assert.equal(health.timedPlanVersion, 1);
+    const device = await connectDevice('dev_timed_plan', 'timed-plan-device-secret');
+    t.after(() => device.close());
+    const account = await appSignUp(device, 'timed-plan@test.com', 'timed-plan-account-password');
+    const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+    const { planExpiry } = require('../lib/plan-catalog');
+    for (const [plan, unit, count] of [['plus', 'day', 7], ['pro', 'month', 3], ['plus', 'year', 2]]) {
+        const before = Date.now();
+        const changed = await form(operator, '/admin/accounts/plan', {
+            accountId: account.accountId, plan, durationUnit: unit, durationCount: String(count)
+        });
+        assert.equal(changed.status, 303);
+        assert.ok(changed.headers.get('location').includes('ok='));
+        const after = Date.now();
+        const state = (await appApi(device, 'GET', '/api/v1/account')).body;
+        assert.equal(state.plan.id, plan);
+        assert.equal(state.plan.source, 'operator');
+        assert.ok(state.plan.expiresAt >= planExpiry(unit, count, before));
+        assert.ok(state.plan.expiresAt <= planExpiry(unit, count, after));
+        const html = await (await visit(operator, `/admin/users/${account.accountId}`)).text();
+        assert.match(html, /name="durationUnit"/);
+        assert.match(html, /name="durationCount"/);
+        assert.match(html, /Türkiye saati/);
+        assert.match(html, /Atama bitişi/);
+        const list = await (await visit(operator, '/admin/users?q=timed-plan%40test.com')).text();
+        assert.match(list, /Bitiş \(Türkiye\)/);
+    }
+    const original = (await appApi(device, 'GET', '/api/v1/account')).body.plan;
+    for (const [unit, count] of [['day', '0'], ['month', '1.5'], ['year', '-1'], ['week', '1']]) {
+        const rejected = await form(operator, '/admin/accounts/plan', {
+            accountId: account.accountId, plan: 'pro', durationUnit: unit, durationCount: count
+        });
+        assert.equal(rejected.status, 303);
+        assert.ok(rejected.headers.get('location').includes('err='));
+        assert.deepEqual((await appApi(device, 'GET', '/api/v1/account')).body.plan, original);
+    }
+    const noCsrf = await visit(operator, '/admin/accounts/plan', {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ accountId: account.accountId, plan: 'pro', durationUnit: 'unlimited' }).toString()
+    });
+    assert.ok(noCsrf.headers.get('location').includes('err='));
+    assert.deepEqual((await appApi(device, 'GET', '/api/v1/account')).body.plan, original);
+    await form(operator, '/admin/accounts/plan', {
+        accountId: account.accountId, plan: 'pro', durationUnit: 'unlimited', durationCount: '1'
+    });
+    const unlimited = (await appApi(device, 'GET', '/api/v1/account')).body;
+    assert.equal(unlimited.plan.id, 'pro');
+    assert.equal(unlimited.plan.expiresAt, 0);
+    const detail = await (await visit(operator, `/admin/users/${account.accountId}`)).text();
+    assert.match(detail, /<dt>Atama bitişi<\/dt><dd>Sınırsız<\/dd>/);
+});
+
 test('operatör plan ve özellikleri anında değiştirir; mevcut misafir ve bulut yedekleri korunur', async (t) => {
     const existingGuest = await connectDevice('dev_policy_guest', 'policy-guest-device-secret');
     t.after(() => existingGuest.close());
@@ -1412,7 +1500,8 @@ test('operatör plan ve özellikleri anında değiştirir; mevcut misafir ve bul
         'yetkisiz kullanıcı ayarları görmemeli');
     const formFields = {
         revision: '0', free_maxDevices: '2', free_maxClients: '9', free_commandsPerDay: '6000',
-        pro_maxDevices: '3', pro_maxClients: '50', pro_commandsPerDay: '100000'
+        plus_maxDevices: '3', plus_maxClients: '50', plus_commandsPerDay: '100000',
+        pro_maxDevices: '20', pro_maxClients: '200', pro_commandsPerDay: '1000000'
     };
     const invalid = await form(operator, '/admin/policy', { ...formFields, free_maxDevices: '0' });
     assert.equal(invalid.status, 303);
@@ -1465,7 +1554,8 @@ test('operatör plan ve özellikleri anında değiştirir; mevcut misafir ve bul
 
     const restored = await form(operator, '/admin/policy', {
         revision: '1', free_maxDevices: '1', free_maxClients: '8', free_commandsPerDay: '5000',
-        pro_maxDevices: '3', pro_maxClients: '50', pro_commandsPerDay: '100000',
+        plus_maxDevices: '3', plus_maxClients: '50', plus_commandsPerDay: '100000',
+        pro_maxDevices: '20', pro_maxClients: '200', pro_commandsPerDay: '1000000',
         registration: 'on', guestEntry: 'on', cloudBackupUploads: 'on'
     });
     assert.equal(restored.status, 303);
@@ -1484,7 +1574,7 @@ test('Pro bitince Free seçimi istenir; seçilmeyen oturum ve şifreli bulut yed
     const signedUp = await appSignUp(main, email, password);
     const operator = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
     assert.equal((await form(operator, '/admin/accounts/plan', {
-        accountId: signedUp.accountId, plan: 'pro'
+        accountId: signedUp.accountId, plan: 'plus'
     })).status, 303);
     const backup = await connectDevice('dev_free_downgrade_backup', 'free-downgrade-backup-secret');
     t.after(() => backup.close());
@@ -1567,7 +1657,7 @@ test('Pro bitince Free seçimi istenir; seçilmeyen oturum ve şifreli bulut yed
     assert.equal(after.body.clients.find((session) => session.clientId === first.clientId)
         .cookieSnapshot.ciphertext, cookiePackage, 'şifreli bulut çerez yedeği silindi');
     assert.equal((await form(operator, '/admin/accounts/plan', {
-        accountId: signedUp.accountId, plan: 'pro'
+        accountId: signedUp.accountId, plan: 'plus'
     })).status, 303);
     assert.equal((await callTool(`${last.clientId}.${last.secret}`)).status, 200);
 });

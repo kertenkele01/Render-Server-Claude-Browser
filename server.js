@@ -9,6 +9,7 @@ const path = require('path');
 const { openStore, recoveryCodeVerifier } = require('./lib/store');
 const accounts = require('./lib/auth');
 const panel = require('./lib/panel');
+const { PLAN_CATALOG_VERSION, resolvePaidPlan, planExpiry } = require('./lib/plan-catalog');
 const oauth = require('./lib/oauth');
 const { cataloguePayload } = require('./lib/quick-links');
 const { protectAsyncRoutes, errorResponse } = require('./lib/http-safety');
@@ -179,17 +180,14 @@ async function notifyAccountPlanChanged(accountId) {
 
 /** Resolves a paid Play entitlement without turning Google Play into an MCP
  * authorization authority. The relay still owns its plan limits; Play only
- * proves whether the account paid for the Pro tier. */
+ * proves whether the account paid for the legacy product, now the Plus tier. */
 async function effectiveAccount(account) {
     if (!account) return null;
     const subscription = await store.getPlayEntitlement(account.id);
     const playActive = subscription?.active === true && Number(subscription.expiresAt || 0) > Date.now();
-    const manualPro = account.plan === 'pro';
     return {
         ...account,
-        plan: manualPro || playActive ? 'pro' : 'free',
-        planSource: manualPro ? 'operator' : (playActive ? 'google_play' : 'free'),
-        planValidUntil: !manualPro && playActive ? Number(subscription.expiresAt) : null,
+        ...resolvePaidPlan(account, subscription),
         billing: subscription ? {
             state: subscription.state,
             active: playActive,
@@ -1644,7 +1642,7 @@ function requireAuth(req, res) {
     const freeAccess = freeAccessState(auth.account);
     if (freeAccess?.required) {
         res.status(403).json({ error: 'free_selection_required',
-            message: 'The Pro plan ended or Free limits changed. Ask the account owner to choose active devices and AI sessions in the Android app. No data was deleted.' });
+            message: 'The paid plan ended or Free limits changed. Ask the account owner to choose active devices and AI sessions in the Android app. No data was deleted.' });
         return null;
     }
     if (freeAccess?.overLimit && !freeAccess.activeClientIds.includes(auth.clientId)) {
@@ -3602,8 +3600,8 @@ app.post('/api/v1/billing/google-play/verify', async (req, res) => {
     }
     try {
         const result = await syncGooglePlaySubscription(purchaseToken, device.accountId);
-        addLog(null, 'Google Play', device.id, 'Pro Satın Alma Doğrulandı', 'success',
-            result.subscription.active ? 'Pro erişimi güncellendi.' : 'Satın alma henüz Pro erişimi vermiyor.');
+        addLog(null, 'Google Play', device.id, 'Plus Satın Alma Doğrulandı', 'success',
+            result.subscription.active ? 'Plus erişimi güncellendi.' : 'Satın alma henüz Plus erişimi vermiyor.');
         const snapshot = await accountSnapshot(devices.get(device.id) || device);
         res.json({ ...snapshot, purchase: {
             verified: true,
@@ -3616,7 +3614,8 @@ app.post('/api/v1/billing/google-play/verify', async (req, res) => {
     } catch (e) {
         const known = {
             invalid_purchase_token: [400, 'Satın alma bilgisi geçersiz.'],
-            google_play_product_mismatch: [409, 'Satın alma bu uygulamanın Pro ürününe ait değil.'],
+            google_play_product_mismatch: [409, 'Satın alma bu uygulamanın Plus ürününe ait değil.'],
+            google_play_base_plan_mismatch: [409, 'Satın alma desteklenen aylık veya yıllık Plus planına ait değil.'],
             purchase_account_mismatch: [409, 'Bu satın alma farklı bir uygulama hesabına bağlı.'],
             purchase_already_linked: [409, 'Bu satın alma başka bir uygulama hesabına bağlı.'],
             purchase_account_not_found: [409, 'Satın almanın bağlı olduğu uygulama hesabı bulunamadı.']
@@ -3729,7 +3728,13 @@ async function accountSnapshot(device) {
             guestEntry: limits.FEATURES.guestEntry,
             cloudBackupUploads: limits.FEATURES.cloudBackupUploads },
         status: account.status,
-        plan: { id: account.plan, label: plan.label, source: account.planSource || 'free' },
+        plan: { id: account.plan, label: plan.label, source: account.planSource || 'free',
+            expiresAt: account.planValidUntil || 0 },
+        planCatalogVersion: PLAN_CATALOG_VERSION,
+        plans: Object.fromEntries(Object.entries(limits.PLANS).map(([id, tier]) => [id, {
+            id, label: tier.label, commandsPerDay: tier.commandsPerDay,
+            maxDevices: tier.maxDevices, maxClients: tier.maxClients
+        }])),
         quota: {
             commandsUsed: usage.commandCount,
             commandsPerDay: plan.commandsPerDay,
@@ -3752,7 +3757,9 @@ async function accountSnapshot(device) {
         } : { overLimit: false, required: false },
         billing: {
             configured: googlePlay.configured,
+            planId: 'plus',
             productId: googlePlay.productId,
+            products: googlePlay.products,
             obfuscatedAccountId: googlePlay.accountIdentifier(account.id),
             state: account.billing?.state || 'NONE',
             active: account.billing?.active === true,
@@ -3762,9 +3769,9 @@ async function accountSnapshot(device) {
             environment: account.billing?.environment || 'production'
         },
         upgrade: {
-            commandsPerDay: limits.PLANS.pro.commandsPerDay,
-            maxDevices: limits.PLANS.pro.maxDevices,
-            maxClients: limits.PLANS.pro.maxClients
+            commandsPerDay: limits.PLANS.plus.commandsPerDay,
+            maxDevices: limits.PLANS.plus.maxDevices,
+            maxClients: limits.PLANS.plus.maxClients
         },
         counts: { devices: ownedDevices.length, clients: ownedClients.length }
     };
@@ -5251,21 +5258,21 @@ app.get('/', async (req, res) => {
     if (!ctx) return;
     const window = limits.currentUsageWindow();
 
-    const [totals, accountRows, catalogue, categories] = await Promise.all([
+    const [totals, storedAccounts, catalogue, categories] = await Promise.all([
         store.aggregates(window),
         store.listAccounts({ limit: 1000 }),
         store.listQuickLinks({ includeInactive: true }),
         store.listQuickLinkCategories()
     ]);
+    const accountRows = await Promise.all(storedAccounts.map(effectiveAccount));
     const recentAccounts = accountRows.slice(0, 6);
     const usageByAccount = await store.usageForAccounts(recentAccounts.map((a) => a.id), window);
     const breakdown = accountRows.reduce((out, row) => {
         if (row.status === 'active') out.active++;
         else out.suspended++;
-        if (row.plan === 'pro') out.pro++;
-        else out.free++;
+        out[row.plan in limits.PLANS ? row.plan : 'free']++;
         return out;
-    }, { active: 0, suspended: 0, pro: 0, free: 0 });
+    }, { active: 0, suspended: 0, plus: 0, pro: 0, free: 0 });
 
     panelHeaders(res);
     res.send(panel.renderOperatorOverview({
@@ -5321,6 +5328,8 @@ app.post('/admin/policy', async (req, res) => {
     const proposed = {
         free: { maxDevices: parseLimit('free', 'maxDevices'), maxClients: parseLimit('free', 'maxClients'),
             commandsPerDay: parseLimit('free', 'commandsPerDay') },
+        plus: { maxDevices: parseLimit('plus', 'maxDevices'), maxClients: parseLimit('plus', 'maxClients'),
+            commandsPerDay: parseLimit('plus', 'commandsPerDay') },
         pro: { maxDevices: parseLimit('pro', 'maxDevices'), maxClients: parseLimit('pro', 'maxClients'),
             commandsPerDay: parseLimit('pro', 'commandsPerDay') },
         features: { registration: req.body?.registration === 'on',
@@ -5328,7 +5337,7 @@ app.post('/admin/policy', async (req, res) => {
             cloudBackupUploads: req.body?.cloudBackupUploads === 'on' }
     };
     const policy = limits.validatePolicy(proposed);
-    if (!policy) return redirect('Kotalar geçersiz. Pro sınırları Free değerlerinden düşük olamaz.', true);
+    if (!policy) return redirect('Kotalar geçersiz. Plus sınırları Free, Pro sınırları Plus değerlerinden düşük olamaz.', true);
     const saved = await store.setProductPolicy(policy, revision, ctx.account.id);
     if (!saved) return redirect('Ayarlar başka bir oturumda değiştirildi. Sayfayı yenileyip yeniden deneyin.', true);
     if (saved.revision > appliedProductPolicyRevision) {
@@ -5341,7 +5350,7 @@ app.post('/admin/policy', async (req, res) => {
         }
     });
     addLog(null, 'Yönetici', null, 'Plan ve Özellik Ayarları', 'warning',
-        `Free ${policy.free.maxDevices}/${policy.free.maxClients}/${policy.free.commandsPerDay}; Pro ${policy.pro.maxDevices}/${policy.pro.maxClients}/${policy.pro.commandsPerDay}; kayıt ${policy.features.registration}; misafir ${policy.features.guestEntry}; yedek ${policy.features.cloudBackupUploads}`,
+        `Free ${policy.free.maxDevices}/${policy.free.maxClients}/${policy.free.commandsPerDay}; Plus ${policy.plus.maxDevices}/${policy.plus.maxClients}/${policy.plus.commandsPerDay}; Pro ${policy.pro.maxDevices}/${policy.pro.maxClients}/${policy.pro.commandsPerDay}; kayıt ${policy.features.registration}; misafir ${policy.features.guestEntry}; yedek ${policy.features.cloudBackupUploads}`,
         null, ctx.account.id);
     console.log(`[Admin] Plan ve özellik ayarları güncellendi (sürüm ${saved.revision}).`);
     return redirect('Plan ve özellik ayarları kaydedildi. Yeni sınırlar hemen uygulanıyor.');
@@ -5356,12 +5365,13 @@ app.get('/admin/users', async (req, res) => {
         status: ['active', 'suspended'].includes(String(req.query.status || '')) ? String(req.query.status) : '',
         plan: Object.prototype.hasOwnProperty.call(limits.PLANS, String(req.query.plan || '')) ? String(req.query.plan) : ''
     };
-    const rows = await store.listAccounts({
+    const storedRows = await store.listAccounts({
         limit: 1000,
         query: filters.q,
-        status: filters.status,
-        plan: filters.plan
+        status: filters.status
     });
+    const rows = (await Promise.all(storedRows.map(effectiveAccount)))
+        .filter((row) => !filters.plan || row.plan === filters.plan);
     const usageByAccount = await store.usageForAccounts(rows.map((row) => row.id), limits.currentUsageWindow());
     panelHeaders(res);
     res.send(panel.renderUsers({
@@ -5430,7 +5440,9 @@ app.get('/admin/users/:accountId', async (req, res) => {
         email: target.email,
         createdAt: target.createdAt,
         status: target.status,
-        plan: target.plan,
+        plan: (await effectiveAccount(target)).plan,
+        assignedPlan: target.plan,
+        planExpiresAt: target.planExpiresAt || null,
         isAdmin: target.isAdmin,
         deviceCount,
         clientCount
@@ -5502,13 +5514,19 @@ app.post('/admin/accounts/plan', async (req, res) => {
         return res.redirect(303, userPageRedirect(accountId, 'Geçersiz plan.', true));
     }
 
-    const updated = await store.setAccountPlan(accountId, plan);
+    let expiresAt;
+    try {
+        expiresAt = planExpiry(String(req.body.durationUnit || 'unlimited').trim(), req.body.durationCount);
+    } catch (e) {
+        return res.redirect(303, userPageRedirect(accountId, e.message, true));
+    }
+    const updated = await store.setAccountPlan(accountId, plan, expiresAt);
     if (!updated) return res.redirect(303, '/admin/users?err=' + encodeURIComponent('Hesap bulunamadı.'));
     await refreshRegistryCache();
 
     console.log(`[Admin] ${updated.email} planı: ${plan}`);
     await notifyAccountPlanChanged(accountId);
-    res.redirect(303, userPageRedirect(accountId, `Plan ${plan.toUpperCase()} olarak güncellendi.`));
+    res.redirect(303, userPageRedirect(accountId, `Plan ${plan.toUpperCase()} olarak ${expiresAt ? 'süreli' : 'sınırsız'} atandı.`));
 });
 
 app.post('/admin/users/:accountId/password', async (req, res) => {
@@ -5977,6 +5995,7 @@ app.get('/api/status', async (req, res) => {
 
 app.get('/healthz', (req, res) => res.json({
     status: 'ok', backupManagementVersion: 1, independentRotationVersion: 2,
+    planCatalogVersion: PLAN_CATALOG_VERSION, timedPlanVersion: 1,
 }));
 app.use(errorResponse);
 
@@ -6022,20 +6041,25 @@ async function reconcilePlaySubscriptions() {
     }
 }
 
-// A Play entitlement can expire between six-hour verification passes. The
+// A Play entitlement or operator grant can expire between registry refreshes. The
 // command gate uses planFor() immediately; this short sweep wakes the app so
 // the owner sees the Free selection prompt without first attempting a tool.
-const notifiedProExpiries = new Set();
-async function notifyExpiredProEntitlements() {
+const notifiedPlanExpiries = new Set();
+async function notifyExpiredPlanEntitlements() {
     const now = Date.now();
     for (const account of accountCache.values()) {
         if (!account.planValidUntil || account.planValidUntil > now) continue;
         const key = `${account.id}:${account.planValidUntil}`;
-        if (notifiedProExpiries.has(key)) continue;
-        notifiedProExpiries.add(key);
+        if (notifiedPlanExpiries.has(key)) continue;
+        const updated = await effectiveAccount(await store.getAccountById(account.id));
+        // A newer admin assignment may have refreshed this entry while awaiting IO.
+        if (accountCache.get(account.id) !== account) continue;
+        if (updated) accountCache.set(account.id, updated);
+        else accountCache.delete(account.id);
         await notifyAccountPlanChanged(account.id);
+        notifiedPlanExpiries.add(key);
     }
-    if (notifiedProExpiries.size > 10000) notifiedProExpiries.clear();
+    if (notifiedPlanExpiries.size > 10000) notifiedPlanExpiries.clear();
 }
 
 async function sweepAudit() {
@@ -6075,7 +6099,7 @@ async function main() {
     if (sweeper.unref) sweeper.unref();
     const billingReconciler = setInterval(reconcilePlaySubscriptions, PLAY_RECONCILE_INTERVAL_MS);
     if (billingReconciler.unref) billingReconciler.unref();
-    const expiryNotifier = setInterval(() => notifyExpiredProEntitlements().catch((e) =>
+    const expiryNotifier = setInterval(() => notifyExpiredPlanEntitlements().catch((e) =>
         console.warn('[Billing] Expiry notification failed:', e.message)), 30_000);
     if (expiryNotifier.unref) expiryNotifier.unref();
     // Also retry stale verification/acknowledgement shortly after a restart;
