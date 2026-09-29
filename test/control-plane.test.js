@@ -1077,7 +1077,10 @@ test('operatör paneli affiliate kısayolunu cihazlara canlı yayınlar', async 
     const refreshed = await visit(operator, '/admin/quick-links');
     const html = await refreshed.text();
     assert.match(html, /Test Bilet/);
-    assert.match(html, /affiliate=bridge&amp;campaign=ai/);
+    const editorPage = await visit(operator, `/admin/quick-links?edit=${site.shortcutId}`);
+    assert.match(await editorPage.text(), /affiliate=bridge&amp;campaign=ai/);
+    assert.match(html, /Açılış raporu/);
+    assert.match(html, /Seçilen dönem/);
     assert.match(html, /1 açılış/);
     assert.match(html, /Kategori yönetimi/);
     assert.match(html, /name="categoryId"/);

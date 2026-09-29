@@ -12,6 +12,7 @@ const panel = require('./lib/panel');
 const { PLAN_CATALOG_VERSION, resolvePaidPlan, planExpiry } = require('./lib/plan-catalog');
 const oauth = require('./lib/oauth');
 const { cataloguePayload } = require('./lib/quick-links');
+const { quickLinkReportRange, quickLinkReport } = require('./lib/quick-link-analytics');
 const { protectAsyncRoutes, errorResponse } = require('./lib/http-safety');
 
 const app = express();
@@ -5644,17 +5645,22 @@ app.get('/admin/quick-links', async (req, res) => {
     const ctx = await requireOperator(req, res);
     if (!ctx) return;
     const csrf = ensureCsrfCookie(req, res, ctx.csrf);
-    const [catalogue, categories] = await Promise.all([
+    const now = Date.now();
+    const range = quickLinkReportRange(req.query, now);
+    const [catalogue, categories, analytics] = await Promise.all([
         store.listQuickLinks({ includeInactive: true }),
-        store.listQuickLinkCategories()
+        store.listQuickLinkCategories(),
+        store.listQuickLinkAnalytics({ from: range.queryFrom, to: range.queryTo })
     ]);
     panelHeaders(res);
     res.send(panel.renderQuickLinks({
         account: ctx.account,
         catalogue,
         categories,
+        report: quickLinkReport(catalogue.links, categories, analytics, range, now),
+        filters: req.query,
         csrf,
-        error: req.query.err ? String(req.query.err).substring(0, 200) : '',
+        error: range.error || (req.query.err ? String(req.query.err).substring(0, 200) : ''),
         notice: req.query.ok ? String(req.query.ok).substring(0, 200) : ''
     }));
 });
@@ -5995,7 +6001,7 @@ app.get('/api/status', async (req, res) => {
 
 app.get('/healthz', (req, res) => res.json({
     status: 'ok', backupManagementVersion: 1, independentRotationVersion: 2,
-    planCatalogVersion: PLAN_CATALOG_VERSION, timedPlanVersion: 1,
+    planCatalogVersion: PLAN_CATALOG_VERSION, timedPlanVersion: 1, quickLinkAnalyticsVersion: 1,
 }));
 app.use(errorResponse);
 

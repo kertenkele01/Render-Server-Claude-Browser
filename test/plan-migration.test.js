@@ -45,7 +45,7 @@ test('stored legacy accounts become Plus once; newly assigned Pro survives reope
         store = await openStore({ stateFile, databaseUrl: '' });
         assert.equal((await store.getAccountById(account.id)).plan, 'pro');
         assert.equal((await store.getProductPolicy()).revision, 2);
-        assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).version, 12);
+        assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).version, 13);
     } finally {
         await store?.close();
         fs.rmSync(stateFile, { force: true });
