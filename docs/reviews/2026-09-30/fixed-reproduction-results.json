@@ -1,0 +1,29 @@
+{
+  "date": "2026-09-30",
+  "mode": "fixed",
+  "relay": {
+    "suspensionCache": {
+      "before": 403,
+      "during": 403,
+      "after": 403,
+      "databaseReadDelayMs": 250,
+      "method": "browser_list_tabs",
+      "forwardedToFakeDevice": 0,
+      "note": "Simulated database latency, not a PostgreSQL run or real browser action"
+    },
+    "registrationLimits": {
+      "configuredWebSocketLimit": 8,
+      "successfulRegistrations": 6,
+      "nextHandshakeBlocked": true,
+      "bulkClientsPersisted": 10,
+      "accountsRequired": false,
+      "serverCrashed": false
+    }
+  },
+  "ssrf": {
+    "filterAllowedMappedLoopback": false,
+    "mappedAddressReachedLocalListener": true,
+    "externalRequestMade": false,
+    "note": "DNS and HTTPS mocked; mapped-address connectivity checked with local TCP only"
+  }
+}

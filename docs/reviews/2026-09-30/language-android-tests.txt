@@ -1,0 +1,68 @@
+Reusing configuration cache.
+> Task :app:preBuild UP-TO-DATE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:preDebugAndroidTestBuild SKIPPED
+> Task :app:generateDebugBuildConfig UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:compileDebugNavigationResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :app:generateDebugRFile UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:mergeDebugAssets UP-TO-DATE
+> Task :app:generateDebugAndroidTestResources UP-TO-DATE
+> Task :app:packageDebugAndroidTestResources UP-TO-DATE
+> Task :app:processDebugAndroidTestManifest UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:generateDebugAndroidTestBuildConfig UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugAndroidTestNavigationResources UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:parseDebugAndroidTestLocalResources UP-TO-DATE
+> Task :app:processDebugUnitTestManifest UP-TO-DATE
+> Task :app:generateDebugAndroidTestRFile UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :app:packageDebugUnitTestForUnitTest UP-TO-DATE
+> Task :app:generateDebugUnitTestConfig UP-TO-DATE
+> Task :app:compileDebugKotlin
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/AnimatedGifView.kt:7:8 'class Movie : Any' is deprecated. Deprecated in Java.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/MainActivity.kt:1197:32 'val Icons.Filled.ArrowForward: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ArrowForward.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/MainActivity.kt:1702:87 Condition is always 'true'.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/MainActivity.kt:1988:49 'val Icons.Filled.ArrowBack: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ArrowBack.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/MainActivity.kt:1999:49 'val Icons.Filled.ArrowForward: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.ArrowForward.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/MainActivity.kt:2269:57 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/MainActivity.kt:2345:50 'val Icons.Filled.List: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Filled.List.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/McpBridgeManager.kt:5853:21 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/McpBridgeManager.kt:6104:62 'val scale: Float' is deprecated. Deprecated in Java.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/McpBridgeManager.kt:7260:33 The corresponding parameter in the supertype 'WebSocketListener' is named 'webSocket'. This may cause problems when calling this function with named arguments.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/McpBridgeManager.kt:7294:36 The corresponding parameter in the supertype 'WebSocketListener' is named 'webSocket'. This may cause problems when calling this function with named arguments.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/McpBridgeManager.kt:7309:36 The corresponding parameter in the supertype 'WebSocketListener' is named 'webSocket'. This may cause problems when calling this function with named arguments.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/McpBridgeManager.kt:7320:35 The corresponding parameter in the supertype 'WebSocketListener' is named 'webSocket'. This may cause problems when calling this function with named arguments.
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/main/java/com/example/McpBridgeManager.kt:7334:36 The corresponding parameter in the supertype 'WebSocketListener' is named 'webSocket'. This may cause problems when calling this function with named arguments.
+
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:bundleDebugClassesToRuntimeJar
+> Task :app:bundleDebugClassesToCompileJar
+> Task :app:compileDebugUnitTestKotlin
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:processDebugUnitTestJavaRes UP-TO-DATE
+
+> Task :app:compileDebugAndroidTestKotlin
+w: file:///C:/Users/kadir/Downloads/Browser-Mcp-Android-main/Browser-Mcp-Android-main/app/src/androidTest/java/com/example/SyncAuditDeviceTest.kt:69:39 Condition is always 'true'.
+
+> Task :app:testDebugUnitTest
+> Task :app:finalizeTestRoborazziDebug SKIPPED
+
+BUILD SUCCESSFUL in 44s
+38 actionable tasks: 6 executed, 32 up-to-date
+Configuration cache entry reused.

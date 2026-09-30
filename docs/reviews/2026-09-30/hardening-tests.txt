@@ -1,0 +1,28 @@
+✔ successful registrations do not reset the WebSocket IP budget (285.4286ms)
+✔ LIMIT_DEVICE_ENROLL_MAX bounds new identities and preserves existing reconnects (577.1715ms)
+✔ LIMIT_DEVICE_ENROLL_GLOBAL_MAX bounds new identities and preserves existing reconnects (572.5531ms)
+✔ MAX_REGISTERED_DEVICES bounds new identities and preserves existing reconnects (604.0382ms)
+✔ the global open-socket cap includes authenticated phones and releases on close (265.0931ms)
+✔ bulk unclaimed registration deduplicates identities and limits later additions (576.0708ms)
+✔ queued client additions cannot both consume the last unclaimed slot (560.6352ms)
+✔ the global client ceiling applies across phones without deleting existing clients (562.5812ms)
+✔ a legacy unclaimed phone keeps all existing routes above a lowered ceiling (574.1905ms)
+✔ concurrent first enrolments cannot overwrite the device secret (288.9947ms)
+✔ a suspended account stays blocked throughout delayed registry refreshes (797.7881ms)
+✔ a failed refresh retains the complete previous snapshot (267.5215ms)
+✔ account-owned credentials fail closed when account metadata is missing (262.8177ms)
+✔ registry capacities use durable counts even after publication fails (559.9731ms)
+✔ OAuth authorization rate limiting runs before metadata fetching (295.5877ms)
+✔ CIMD blocks private and special IP ranges including mapped IPv6 before HTTPS (4.4169ms)
+✔ public CIMD metadata still succeeds and pins every DNS lookup form (0.9369ms)
+✔ CIMD caps the encoded UTF-8 body bytes and does not follow redirects (0.5215ms)
+✔ CIMD bounds concurrent DNS reads and never connects after a total timeout (1.1273ms)
+✔ the total metadata deadline includes body transfer and destroys slow requests (0.227ms)
+ℹ tests 20
+ℹ suites 0
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7179.1418

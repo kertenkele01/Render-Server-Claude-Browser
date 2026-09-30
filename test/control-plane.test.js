@@ -210,6 +210,10 @@ test.before(async () => {
             BRIDGE_STATE_FILE: stateFile,
             ALLOW_REGISTRATION: 'true',
             LIMIT_REGISTER_MAX: '100', // The suite intentionally creates isolated accounts.
+            // One shared loopback relay serves the whole fixture suite. Abuse
+            // limits themselves are exercised with small budgets in hardening tests.
+            LIMIT_WEBSOCKET_MAX: '200',
+            LIMIT_DEVICE_ENROLL_MAX: '200',
             ADMIN_EMAILS: OPERATOR_EMAIL
         },
         stdio: ['ignore', 'pipe', 'pipe']
@@ -1449,8 +1453,15 @@ test('operator grants accept counted durations, expose the deadline and reject i
         const state = (await appApi(device, 'GET', '/api/v1/account')).body;
         assert.equal(state.plan.id, plan);
         assert.equal(state.plan.source, 'operator');
-        assert.ok(state.plan.expiresAt >= planExpiry(unit, count, before));
-        assert.ok(state.plan.expiresAt <= planExpiry(unit, count, after));
+        // Client and relay are separate processes. Keep a small clock margin
+        // on Windows while still detecting an incorrect calendar duration.
+        const clockMarginMs = process.platform === 'win32' ? 50 : 0;
+        const earliest = planExpiry(unit, count, before);
+        const latest = planExpiry(unit, count, after);
+        assert.ok(state.plan.expiresAt >= earliest - clockMarginMs,
+            `${unit}/${count}: expiry ${state.plan.expiresAt} precedes ${earliest} by ${earliest - state.plan.expiresAt}ms`);
+        assert.ok(state.plan.expiresAt <= latest + clockMarginMs,
+            `${unit}/${count}: expiry ${state.plan.expiresAt} exceeds ${latest} by ${state.plan.expiresAt - latest}ms`);
         const html = await (await visit(operator, `/admin/users/${account.accountId}`)).text();
         assert.match(html, /name="durationUnit"/);
         assert.match(html, /name="durationCount"/);

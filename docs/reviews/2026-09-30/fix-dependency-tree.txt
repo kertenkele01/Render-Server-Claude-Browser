@@ -1,0 +1,8 @@
+mcp-android-bridge@1.0.0 C:\Users\kadir\Downloads\Browser-Mcp-Android-main\Browser-Mcp-Android-main
+├─┬ express@4.22.3
+│ ├─┬ body-parser@1.20.8
+│ │ └── qs@6.16.0 deduped
+│ └── qs@6.16.0
+├── ipaddr.js@2.5.0
+└─┬ proxy-addr@2.0.7
+  └── ipaddr.js@1.9.1

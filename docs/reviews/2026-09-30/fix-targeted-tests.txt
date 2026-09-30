@@ -1,0 +1,40 @@
+✔ kimliksiz istek OAuth sunucusunu işaret eder (243.8147ms)
+✔ keşif belgeleri yayınlanıyor (9.6191ms)
+✔ CIMD belgesi kimliği ve yönlendirme adresini doğrular (0.428ms)
+✔ ChatGPT CIMD geçiş belgesinde ortak none yöntemi seçilir (0.2116ms)
+✔ CIMD belgesinde ortak token doğrulama yöntemi yoksa reddedilir (0.1976ms)
+✔ doğrulanamayan OAuth isteği kod formu göstermez (0.5694ms)
+✔ OAuth kullanıcı sayfaları İngilizce gösterilebilir (0.3797ms)
+✔ OAuth dili güvenli destek listesi ve tarayıcı tercihiyle seçilir (0.1945ms)
+✔ istemci kendini kaydedebilir (3.8698ms)
+✔ güvensiz redirect_uri reddedilir (6.4468ms)
+✔ istemci sırrı taşıyan akışlar reddedilir (1.7813ms)
+✔ telefondaki kodla tam akış çalışır ve jeton komut çalıştırır (30.5749ms)
+✔ Claude callback yeni GET gezinmesiyle açılır ve aynı geçiş kurtarılabilir (9.1322ms)
+✔ ChatGPT callback bağımsız gezinme belgesiyle açılır ve aynı geçiş kurtarılabilir (8.6174ms)
+✔ kod tek kullanımlık (5.6498ms)
+✔ yanlış code_verifier jetona dönüşmez (4.8245ms)
+✔ PKCE olmadan yetkilendirme yapılmaz (1.7659ms)
+✔ kayıtsız redirect_uri yönlendirme almaz (1.5379ms)
+✔ cihaz başkasının istemcisi için kod üretemez (3.2826ms)
+✔ iptal jetonu gerçekten öldürür (5.2454ms)
+✔ unauthenticated malformed WebSocket frames and cookies cannot crash the relay (599.3068ms)
+✔ MCP and REST reject every reserved control field before forwarding (559.0821ms)
+✔ reserved operator address cannot be captured through public signup (700.0595ms)
+✔ caller-supplied forwarded IP cannot reset the direct connection rate limit (263.5408ms)
+✔ trusted proxy chain resolves the rightmost untrusted address (277.0077ms)
+✔ identified operations deduplicate concurrent calls, reject conflicts and cancel on timeout (2341.9474ms)
+✔ OAuth requires the registered query, refuses fragments/userinfo, allows only loopback port variation (0.4417ms)
+[HTTP] Request failed (500)
+✔ every async HTTP handler has an error boundary without leaking secret errors (13.2994ms)
+✔ operation cache retains uncertain outcomes and has bounded admission (38.2859ms)
+✔ operator provisioning CLI reads a hidden password and requires explicit promotion (392.5889ms)
+✔ configured public origin preserves HTTPS metadata without trusting forwarded headers (2.4989ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 6481.6395

@@ -1,0 +1,266 @@
+
+> mcp-android-bridge@1.0.0 test
+> node --test test/*.test.js
+
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-policy-1c9c91e7-e633-4b4c-a785-19d58cc4ede8.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-policy-1c9c91e7-e633-4b4c-a785-19d58cc4ede8.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-policy-1c9c91e7-e633-4b4c-a785-19d58cc4ede8.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-management-nr17wi\state.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 2 hesap, 3 cihaz, 0 istemci geri yüklendi.
+[Store] file: 2 hesap, 3 cihaz, 1 istemci geri yüklendi.
+✔ device policies are signed, scoped, immutable-key bound and atomically selected (30.1445ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-management-YLxSsK\state.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ backup rotation requires owner policy and a signed device request; repeats never rotate twice (950.995ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-management-0RwAwl\state.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ revoking token retrieval while rotation is pending blocks result disclosure and retries (313.6424ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-management-6A4IOv\state.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ token read, OAuth and main-selection opt-outs are enforced independently of sync (322.0914ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-management-5CrRDF\state.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ rotation reports an offline credential origin without changing registry state (296.4466ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-management-KKybjo\state.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ an authorized backup renews without the origin, and continues after the main device is removed (326.6023ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\backup-management-5MNu6J\state.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ concurrent independent rotations commit once and a stale origin reconnect cannot restore its old hash (307.0492ms)
+✔ independent rotation checks the current grant, binding, signature and key revision (309.7202ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-test-1790733596591.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ uygulamadan kayıt cihazı kendiliğinden bağlar (695.3585ms)
+✔ cihaz sınırında giriş eski cihaza erişmeden seçimle tamamlanır (353.4294ms)
+✔ bir cihaz başka bir hesaba giriş yapamaz (189.6338ms)
+✔ yanlış parola hesabın varlığını sızdırmaz (130.3104ms)
+✔ zayıf parola ve bozuk e-posta reddedilir (4.0526ms)
+✔ uygulama API cihaz kimliği ister (1.1521ms)
+✔ parola uygulamadan değiştirilebilir (442.748ms)
+✔ parola değiştirme denemeleri hesap bazında sınırlanır (892.275ms)
+✔ bir hesap diğerinin verisini hiçbir uçtan göremez (142.6067ms)
+✔ yanlış cihaz sırrı ile kayıt reddedilir (3.9908ms)
+✔ istemci anahtarı çalışır, telefondan iptal edilince durur (376.6654ms)
+✔ aynı AI anahtarı aynı hesaptaki iki yetkili cihaza açıkça yönlendirilebilir (921.5228ms)
+✔ şifreli mevcut token ikinci telefondan alınır ve OAuth aynı tokenı teslim eder (1025.8912ms)
+✔ yedekte oluşturulan oturum ve yerel çerezler tek seferlik paketle ana cihaza devredilir (367.4256ms)
+✔ askıya alınan hesabın anahtarları anında durur (133.7454ms)
+✔ kısayol aracı röleden yönlendirilir (64.3837ms)
+✔ misafir oturumu kalıcı anonim kimlik alır ve operatör logunda görünür (118.8012ms)
+✔ misafir cihaz kaydolunca mevcut AI bağlantısı korunur ve yalnızca seçilen eşitlemeyle yayımlanır (72.2719ms)
+✔ misafir cihaz mevcut hesaba cihaz sınırı üzerinden girince yerel AI bağlantısını korur (189.3589ms)
+✔ hesaba özel tek kurtarma kodu parolayı sıfırlar, yedek anahtarını korur ve tek kullanımlıdır (513.4704ms)
+✔ operatör paneli affiliate kısayolunu cihazlara canlı yayınlar (188.58ms)
+✔ kimlik bilgisi sorgu dizesinden kabul edilmez (2.8944ms)
+✔ başarısız kimlik denemeleri sınırlanır (13.6228ms)
+✔ denetim kaydı tam adres veya içerik tutmaz (448.8653ms)
+✔ panel oturum ister (1.3408ms)
+✔ operatör olmayan hesap panelde yönetim göremez (122.401ms)
+✔ operatör toplamları ve hesap listesini görür (70.9873ms)
+✔ web panelinde hesap kaydı yoktur (1.3498ms)
+✔ yönetici kullanıcı ayrıntısını yönetir ve güvenli parola sıfırlar (400.3395ms)
+✔ CSRF alanı olmadan panel girişi kabul edilmez (2.4123ms)
+✔ şifreli anahtar geçişi ve kapalı eşitlemede bulut yedeği yönetimi hesaba özeldir (614.6905ms)
+✔ giriş yapmış yedek ana cihazda sonradan eklenen oturumu ve şifreli paketleri yeniden giriş yapmadan görür (208.9859ms)
+✔ Free Plus Pro are separate operator choices and account catalogues preserve Plus billing (131.6292ms)
+✖ operator grants accept counted durations, expose the deadline and reject invalid periods without changes (134.7951ms)
+✔ operatör plan ve özellikleri anında değiştirir; mevcut misafir ve bulut yedekleri korunur (239.02ms)
+✔ Pro bitince Free seçimi istenir; seçilmeyen oturum ve şifreli bulut yedeği silinmez (259.2496ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\credential-sharing-3cad1316-dbc0-4e20-aeed-bb5e0c92a423.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\credential-sharing-3cad1316-dbc0-4e20-aeed-bb5e0c92a423.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 2 hesap, 3 cihaz, 1 istemci geri yüklendi.
+✔ file: shared credentials keep identity, binding and password boundaries (12.0566ms)
+✔ Plus monthly and yearly purchases are verified using Google product and base-plan identities (8.2282ms)
+✔ a Google-confirmed Pro purchase cannot grant Plus while Pro is coming soon (2.3698ms)
+✔ unknown or missing Plus base plans cannot grant paid access (3.6579ms)
+✔ legacy shared Pro setting does not disable Plus or enable Pro purchases (4.4259ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-main-4452-1790733596635.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-main-4452-1790733596635.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 1 hesap, 2 cihaz, 3 istemci geri yüklendi.
+✔ file: only the explicitly selected prepared main device publishes; opt-outs and generations survive restart (14.9124ms)
+✔ kimliksiz istek OAuth sunucusunu işaret eder (385.0469ms)
+✔ keşif belgeleri yayınlanıyor (12.1829ms)
+✔ CIMD belgesi kimliği ve yönlendirme adresini doğrular (0.5969ms)
+✔ ChatGPT CIMD geçiş belgesinde ortak none yöntemi seçilir (0.2957ms)
+✔ CIMD belgesinde ortak token doğrulama yöntemi yoksa reddedilir (0.2912ms)
+✔ doğrulanamayan OAuth isteği kod formu göstermez (0.7917ms)
+✔ OAuth kullanıcı sayfaları İngilizce gösterilebilir (0.5486ms)
+✔ OAuth dili güvenli destek listesi ve tarayıcı tercihiyle seçilir (0.2426ms)
+✔ istemci kendini kaydedebilir (5.4521ms)
+✔ güvensiz redirect_uri reddedilir (10.4706ms)
+✔ istemci sırrı taşıyan akışlar reddedilir (4.3012ms)
+✔ telefondaki kodla tam akış çalışır ve jeton komut çalıştırır (40.0846ms)
+✔ Claude callback yeni GET gezinmesiyle açılır ve aynı geçiş kurtarılabilir (9.1864ms)
+✔ ChatGPT callback bağımsız gezinme belgesiyle açılır ve aynı geçiş kurtarılabilir (11.8495ms)
+✔ kod tek kullanımlık (6.6801ms)
+✔ yanlış code_verifier jetona dönüşmez (6.2293ms)
+✔ PKCE olmadan yetkilendirme yapılmaz (2.5125ms)
+✔ kayıtsız redirect_uri yönlendirme almaz (3.4804ms)
+✔ cihaz başkasının istemcisi için kod üretemez (4.5973ms)
+✔ iptal jetonu gerçekten öldürür (6.9261ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\plan-duration-b1750f7f-0dfd-43a7-94ca-170021f3779e.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\plan-duration-b1750f7f-0dfd-43a7-94ca-170021f3779e.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 1 hesap, 0 cihaz, 0 istemci geri yüklendi.
+✔ operator periods count days, calendar months and years, clamping month ends (2.8476ms)
+✔ manual access stops at the exact deadline, preserving an unexpired Play Plus subscription (1.3572ms)
+✔ file: timed assignments survive reopening; renewal and unlimited assignments replace the deadline (12.464ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\plan-migration-cf8203a5-1eee-4ab7-a765-588d85c3c7f0.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\plan-migration-cf8203a5-1eee-4ab7-a765-588d85c3c7f0.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 1 hesap, 0 cihaz, 0 istemci geri yüklendi.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\plan-migration-cf8203a5-1eee-4ab7-a765-588d85c3c7f0.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 1 hesap, 0 cihaz, 0 istemci geri yüklendi.
+✔ legacy customized Pro ceilings migrate to Plus without reducing either paid tier (1.9546ms)
+✔ stored legacy accounts become Plus once; newly assigned Pro survives reopening (18.3049ms)
+✔ existing Play entitlement grants Plus, never the upper Pro; operator Pro remains independent (0.3247ms)
+✔ PostgreSQL migration has a durable atomic marker and preserves customized lower-tier ceilings (0.352ms)
+✔ Free Plus Pro relay sınırlarında güvenlik özelliklerini ayırmaz (1.852ms)
+✔ süresi dolmuş Play önbelleği ücretli sınırları uzatmaz (0.2103ms)
+✔ Pro bitince fazla cihaz ve oturumlar seçim yapılana kadar durur; kayıtlar saklanır (0.3761ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-play-billing-1476-1790733596731.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-play-billing-1476-1790733596731.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 2 hesap, 0 cihaz, 0 istemci geri yüklendi.
+✔ Play aboneliği hesap sınırını aşmadan ve bildirimleri iki kez işlemeden kalıcı tutulur (8.1235ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\product-policy-22640-1790733596753.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\product-policy-22640-1790733596753.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 0 hesap, 0 cihaz, 0 istemci geri yüklendi.
+✔ plan ayarları sıkı doğrulanır ve Free Plus Pro hiyerarşisi korunur (1.9223ms)
+✔ dosya deposu plan ayarlarını sürüm kontrolüyle kalıcı tutar (7.5306ms)
+✔ PostgreSQL şemasında plan ayarları tablosu kalıcıdır (0.2628ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\quick-link-analytics-fa5b8e71-a40a-4f60-bbc5-7082d17b79d9.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\quick-link-analytics-fa5b8e71-a40a-4f60-bbc5-7082d17b79d9.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 0 hesap, 0 cihaz, 0 istemci geri yüklendi.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\quick-link-legacy-27edcfda-75cf-4626-865e-a1a6e551d274.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\quick-link-legacy-27edcfda-75cf-4626-865e-a1a6e551d274.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 0 hesap, 0 cihaz, 0 istemci geri yüklendi.
+[Store] file: 0 hesap, 0 cihaz, 0 istemci geri yüklendi.
+✔ UTC ranges include both selected dates, cross month boundaries, and reject invalid ranges (2.7438ms)
+✔ daily and monthly sums match category and site reports, preserving historical totals separately (1.3699ms)
+✔ file: opens update total and daily counters atomically, survive restart, and respect hidden/deleted sites (20.664ms)
+✔ file migration keeps legacy total without inventing dated openings (4.3286ms)
+✔ operator view filters and escapes untrusted catalogue copy without scripts or affiliate URLs in the listing (18.677ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-quick-links-2796-1790733596802.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-quick-links-2796-1790733596802.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 0 hesap, 0 cihaz, 0 istemci geri yüklendi.
+✔ AI catalogue translates legacy built-in system copy without changing URLs (0.9077ms)
+✔ operator quick links persist affiliate URLs and catalogue revision (23.3805ms)
+✔ successful registrations do not reset the WebSocket IP budget (407.092ms)
+✔ LIMIT_DEVICE_ENROLL_MAX bounds new identities and preserves existing reconnects (623.3059ms)
+✔ LIMIT_DEVICE_ENROLL_GLOBAL_MAX bounds new identities and preserves existing reconnects (609.6554ms)
+✔ MAX_REGISTERED_DEVICES bounds new identities and preserves existing reconnects (621.9619ms)
+✔ the global open-socket cap includes authenticated phones and releases on close (299.2076ms)
+✔ bulk unclaimed registration deduplicates identities and limits later additions (592.4028ms)
+✔ queued client additions cannot both consume the last unclaimed slot (591.6701ms)
+✔ the global client ceiling applies across phones without deleting existing clients (580.4389ms)
+✔ a legacy unclaimed phone keeps all existing routes above a lowered ceiling (577.525ms)
+✔ concurrent first enrolments cannot overwrite the device secret (305.5508ms)
+✔ a suspended account stays blocked throughout delayed registry refreshes (811.4713ms)
+✔ a failed refresh retains the complete previous snapshot (290.0467ms)
+✔ account-owned credentials fail closed when account metadata is missing (271.0937ms)
+✔ registry capacities use durable counts even after publication fails (568.1326ms)
+✔ OAuth authorization rate limiting runs before metadata fetching (281.6943ms)
+✔ CIMD blocks private and special IP ranges including mapped IPv6 before HTTPS (4.5204ms)
+✔ public CIMD metadata still succeeds and pins every DNS lookup form (0.9727ms)
+✔ CIMD caps the encoded UTF-8 body bytes and does not follow redirects (0.5127ms)
+✔ CIMD bounds concurrent DNS reads and never connects after a total timeout (1.5534ms)
+✔ the total metadata deadline includes body transfer and destroys slow requests (0.29ms)
+✔ unauthenticated malformed WebSocket frames and cookies cannot crash the relay (684.2652ms)
+✔ MCP and REST reject every reserved control field before forwarding (589.2904ms)
+✔ reserved operator address cannot be captured through public signup (729.7401ms)
+✔ caller-supplied forwarded IP cannot reset the direct connection rate limit (297.4547ms)
+✔ trusted proxy chain resolves the rightmost untrusted address (294.6534ms)
+✔ identified operations deduplicate concurrent calls, reject conflicts and cancel on timeout (2348.1384ms)
+✔ OAuth requires the registered query, refuses fragments/userinfo, allows only loopback port variation (0.4131ms)
+[HTTP] Request failed (500)
+✔ every async HTTP handler has an error boundary without leaking secret errors (15.7705ms)
+✔ operation cache retains uncertain outcomes and has bounded admission (35.2979ms)
+✔ operator provisioning CLI reads a hidden password and requires explicit promotion (415.5157ms)
+✔ configured public origin preserves HTTPS metadata without trusting forwarded headers (2.1828ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-store-multi-7116-1790733596871.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-store-multi-7116-1790733596871.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 2 hesap, 3 cihaz, 2 istemci geri yüklendi.
+✔ dosya deposu çoklu cihaz bağlarını kalıcı tutar ve hash çatışmasını reddeder (25.2885ms)
+✔ Postgres TLS follows the connection route and explicit sslmode (1.9441ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\recovery-safety-ae873906-aee6-4c4f-aeb6-675d5e40f824.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\recovery-migration-2351ee85-0114-40cc-81db-23de9ebc02ce.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 1 hesap, 0 cihaz, 0 istemci geri yüklendi.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\recovery-migration-2351ee85-0114-40cc-81db-23de9ebc02ce.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] file: 1 hesap, 0 cihaz, 0 istemci geri yüklendi.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\sync-safety-dd46f8b0-7be5-4da9-af0d-9af36f4ce06d.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ file: account-bound recovery code is single-use and preserves encrypted data (18.5571ms)
+✔ file: existing recovery codes migrate without becoming replayable (10.1479ms)
+✔ file: password envelopes and explicit backup deletion are atomic (5.9678ms)
+✔ her araç şemasının bir komut karşılığı var (2.067ms)
+✔ form araçları eksiksiz kayıtlı (2.193ms)
+✔ etkileşim kategorisi form araçlarını listeler (0.4434ms)
+✔ görsel koordinat araçları şema yönlendirme belge ve REST yollarında eksiksiz (1.7056ms)
+✔ kimliksiz POST /mcp OAuth sunucusunu işaret eder (321.6846ms)
+✔ el sıkışma Streamable HTTP üzerinde tamamlanır (6.7794ms)
+✔ araç listesi ve araç çağrısı POST yanıtında döner (13.4666ms)
+✔ browser documentation is an English operating guide with forms, shortcuts and CAPTCHA policy (3.6335ms)
+✔ bilinmeyen araç JSON-RPC hatası döner (1.8951ms)
+✔ sunucu kaynaklı akış sunulmadığı açıkça söylenir (2.1008ms)
+✔ SSE bağlantı sınırı akış başlamadan temiz bir 429 döndürür (63.2127ms)
+✔ eski ve yeni taşıma aynı yanıtı verir (7.0223ms)
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-usage-920-1790733596978.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-audit-920-1790733596986.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ araç analitiği yalnızca toplulaştırılmış güvenli alanları saklar ve filtreler (7.6099ms)
+✔ son denetim kayıtları kullanıcıya göre filtrelenir ve yeniden eskiye sıralanır (3.1054ms)
+ℹ tests 141
+ℹ suites 0
+ℹ pass 140
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15523.9462
+
+✖ failing tests:
+
+test at test\control-plane.test.js:1436:1
+✖ operator grants accept counted durations, expose the deadline and reject invalid periods without changes (134.7951ms)
+  AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value:
+
+    assert.ok(state.plan.expiresAt >= planExpiry(unit, count, before))
+
+      at TestContext.<anonymous> (C:\Users\kadir\Downloads\Browser-Mcp-Android-main\Browser-Mcp-Android-main\test\control-plane.test.js:1456:16)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1125:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:787:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

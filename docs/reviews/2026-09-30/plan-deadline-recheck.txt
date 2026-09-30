@@ -1,0 +1,11 @@
+[Store] DATABASE_URL tanımlı değil — dosya deposu kullanılıyor (C:\Users\kadir\AppData\Local\Temp\bridge-test-1790733706459.json).
+[Store] UYARI: Render gibi ortamlarda bu dosya her dağıtımda silinir. Hesaplar kalıcı olmaz.
+✔ operator grants accept counted durations, expose the deadline and reject invalid periods without changes (550.723ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 6494.1967

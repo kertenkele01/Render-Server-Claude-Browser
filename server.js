@@ -102,6 +102,10 @@ const COMMAND_TIMEOUT_MS = Math.max(1000, positiveEnv('COMMAND_TIMEOUT_MS', 9000
 const DEVICE_COMMAND_TIMEOUT_MS = Math.min(60000, Math.floor(COMMAND_TIMEOUT_MS * 2 / 3));
 const MAX_UNAUTH_WS_GLOBAL = positiveEnv('MAX_UNAUTH_WS_GLOBAL', 64);
 const MAX_UNAUTH_WS_PER_IP = positiveEnv('MAX_UNAUTH_WS_PER_IP', 8);
+const MAX_WS_CONNECTIONS_GLOBAL = positiveEnv('MAX_WS_CONNECTIONS_GLOBAL', 1000);
+const MAX_REGISTERED_DEVICES = positiveEnv('MAX_REGISTERED_DEVICES', 10000);
+const MAX_REGISTERED_CLIENTS = positiveEnv('MAX_REGISTERED_CLIENTS', 100000);
+const MAX_UNCLAIMED_CLIENTS = positiveEnv('MAX_UNCLAIMED_CLIENTS', 10);
 const MAX_SSE_CHANNELS_GLOBAL = positiveEnv('MAX_SSE_CHANNELS_GLOBAL', 500);
 const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD_BYTES });
 let unauthenticatedWebSockets = 0;
@@ -201,37 +205,50 @@ async function effectiveAccount(account) {
     };
 }
 
-/** Rebuilds the hot-path cache from the store. */
-async function refreshRegistryCache() {
+// A slower, older refresh must never overwrite a newer one. Failures release
+// the queue while leaving the last complete snapshot in service.
+let registryRefreshQueue = Promise.resolve();
+function refreshRegistryCache() {
+    const refresh = registryRefreshQueue.then(rebuildRegistryCache);
+    registryRefreshQueue = refresh.catch(() => {});
+    return refresh;
+}
+
+/** Publish all registry maps together, without an await in the publication. */
+async function rebuildRegistryCache() {
     const [deviceRows, clientRows] = await Promise.all([
         store.listAllDevices(),
         store.listAllClients()
     ]);
-    devices.clear();
-    clientRows.forEach((c) => clients.set(c.id, c));
-    deviceRows.forEach((d) => devices.set(d.id, d));
-    accountDeviceIds.clear();
-    accountClientIds.clear();
+    const nextAccountDevices = new Map();
+    const nextAccountClients = new Map();
     deviceRows.forEach((d) => {
         if (!d.accountId) return;
-        if (!accountDeviceIds.has(d.accountId)) accountDeviceIds.set(d.accountId, new Set());
-        accountDeviceIds.get(d.accountId).add(d.id);
+        if (!nextAccountDevices.has(d.accountId)) nextAccountDevices.set(d.accountId, new Set());
+        nextAccountDevices.get(d.accountId).add(d.id);
     });
     clientRows.forEach((c) => {
         if (!c.accountId) return;
-        if (!accountClientIds.has(c.accountId)) accountClientIds.set(c.accountId, new Set());
-        accountClientIds.get(c.accountId).add(c.id);
+        if (!nextAccountClients.has(c.accountId)) nextAccountClients.set(c.accountId, new Set());
+        nextAccountClients.get(c.accountId).add(c.id);
     });
-    for (const id of [...clients.keys()]) {
-        if (!clientRows.some((c) => c.id === id)) clients.delete(id);
-    }
-    const accountIds = new Set();
-    deviceRows.forEach((d) => d.accountId && accountIds.add(d.accountId));
-    accountCache.clear();
+    const accountIds = new Set([...nextAccountDevices.keys(), ...nextAccountClients.keys()]);
+    const nextAccounts = new Map();
     for (const id of accountIds) {
         const account = await effectiveAccount(await store.getAccountById(id));
-        if (account) accountCache.set(id, account);
+        if (account) nextAccounts.set(id, account);
     }
+
+    devices.clear();
+    deviceRows.forEach((d) => devices.set(d.id, d));
+    clients.clear();
+    clientRows.forEach((c) => clients.set(c.id, c));
+    accountDeviceIds.clear();
+    nextAccountDevices.forEach((ids, id) => accountDeviceIds.set(id, ids));
+    accountClientIds.clear();
+    nextAccountClients.forEach((ids, id) => accountClientIds.set(id, ids));
+    accountCache.clear();
+    nextAccounts.forEach((account, id) => accountCache.set(id, account));
 
     console.log(`[Registry] ${devices.size} cihaz, ${clients.size} istemci, ${accountCache.size} hesap önbelleğe alındı.`);
 }
@@ -1590,6 +1607,7 @@ function authenticate(req) {
     if (!record) return { ok: false, reason: 'unknown' };
     if (!safeEquals(sha256(cred.secret), record.secretHash)) return { ok: false, reason: 'bad_secret' };
     const account = record.accountId ? accountCache.get(record.accountId) || null : null;
+    if (record.accountId && !account) return { ok: false, reason: 'account_unavailable' };
     return { ok: true, clientId: cred.clientId, secret: cred.secret, record, account };
 }
 
@@ -1609,6 +1627,13 @@ function authenticate(req) {
 function requireAuth(req, res) {
     const ip = limits.clientIp(req);
     const auth = authenticate(req);
+
+    if (auth.reason === 'account_unavailable') {
+        res.setHeader('Retry-After', '5');
+        res.status(503).json({ error: 'account_unavailable',
+            message: 'Account information is temporarily unavailable. Retry after the relay refreshes its registry.' });
+        return null;
+    }
 
     if (!auth.ok) {
         const gate = limits.hit('credential', ip);
@@ -1717,8 +1742,14 @@ async function clientCreationLimit(accountId) {
     return limits.planFor(account).maxClients;
 }
 
-async function mayCreateClient(accountId, clientId) {
-    if (!accountId || clients.has(clientId)) return true;
+async function mayCreateClient(accountId, clientId, deviceId) {
+    // Existing identities stay recoverable when a safety ceiling is lowered.
+    if (await store.getClient(clientId)) return true;
+    if (await store.countAllClients() >= MAX_REGISTERED_CLIENTS) return false;
+    if (!accountId) {
+        const local = (await store.deviceClientIds(deviceId)).length;
+        return local < MAX_UNCLAIMED_CLIENTS;
+    }
     const [maximum, current] = await Promise.all([
         clientCreationLimit(accountId),
         store.countClients(accountId)
@@ -1873,9 +1904,18 @@ function dispatchCommandToBrowser(type, args, clientId, clientSecret, requestedD
     });
 }
 
-// Only the Android app is supposed to open this socket. A browser always sends
-// an Origin header, so rejecting unknown origins closes cross-site WebSocket
-// hijacking without getting in the native client's way.
+// Serialize new identities across sockets, not only frames on one socket.
+// This also prevents concurrent first enrolments from overwriting a device's
+// secret or bypassing the registry/client ceilings.
+let registryMutationQueue = Promise.resolve();
+function serializeRegistryMutation(action) {
+    const mutation = registryMutationQueue.then(action);
+    registryMutationQueue = mutation.catch(() => {});
+    return mutation;
+}
+
+// A browser supplies an Origin header. Reject unknown origins while allowing
+// the native Android client to connect without one.
 server.on('upgrade', (request, socket, head) => {
     const origin = request.headers.origin;
     if (origin && !ALLOWED_ORIGINS.includes(origin)) {
@@ -1887,7 +1927,8 @@ server.on('upgrade', (request, socket, head) => {
     const ip = limits.clientIp(request);
     const attempt = limits.hit('websocket', ip);
     const openForIp = unauthenticatedWebSocketsByIp.get(ip) || 0;
-    if (!attempt.allowed || unauthenticatedWebSockets >= MAX_UNAUTH_WS_GLOBAL || openForIp >= MAX_UNAUTH_WS_PER_IP) {
+    if (!attempt.allowed || wss.clients.size >= MAX_WS_CONNECTIONS_GLOBAL ||
+        unauthenticatedWebSockets >= MAX_UNAUTH_WS_GLOBAL || openForIp >= MAX_UNAUTH_WS_PER_IP) {
         const retryAfter = attempt.retryAfterSeconds || 10;
         socket.write(`HTTP/1.1 429 Too Many Requests\r\nRetry-After: ${retryAfter}\r\nConnection: close\r\n\r\n`);
         socket.destroy();
@@ -1964,114 +2005,129 @@ wss.on('connection', (ws, request) => {
 
         // --- registration is the only thing an unauthenticated socket may do ---
         if (payload.type === 'register') {
-            if (authenticated) return fail('Bağlantı kimliği değiştirilemez');
-            const id = String(payload.deviceId || '').trim();
-            const secret = String(payload.deviceSecret || '');
-            if (!id || !secret || secret.length < 16) {
-                return fail('deviceId ve en az 16 karakterlik deviceSecret gerekli');
-            }
-
-            const known = devices.get(id);
-            if (known) {
-                if (!safeEquals(sha256(secret), known.secretHash)) {
-                    console.warn(`[WS] Rejected register for '${id}': device secret mismatch.`);
-                    addLog(null, 'Bilinmeyen', id, 'Reddedilen Kayıt', 'error', 'Cihaz sırrı eşleşmedi.');
-                    return fail('Cihaz sırrı eşleşmiyor');
+            return serializeRegistryMutation(async () => {
+                if (ws.readyState !== 1) return;
+                if (authenticated) return fail('Bağlantı kimliği değiştirilemez');
+                const id = String(payload.deviceId || '').trim();
+                const secret = String(payload.deviceSecret || '');
+                if (!id || id.length > 128 || !secret || secret.length < 16 || secret.length > 256) {
+                    return fail('deviceId ve en az 16 karakterlik deviceSecret gerekli');
                 }
-                await store.upsertDevice({
-                    id,
-                    secretHash: known.secretHash,
-                    name: String(payload.deviceName || known.name || id).substring(0, 60)
-                });
-            } else {
-                // Trust on first use used to be the whole enrolment story, and it
-                // was only survivable because the registry was one operator's
-                // own phone: lose the state file and every deviceId was up for
-                // grabs again — including the chance to wipe a real device's
-                // client list by registering an empty one.
-                //
-                // The durable store closes that window, and a claim code puts
-                // the device under an account. An unclaimed device still routes
-                // commands, because routing needs a client secret only the real
-                // phone can mint, and refusing would break every install that
-                // upgrades into this version. What it does not get is a place
-                // in anyone's panel until its owner claims it.
-                await store.upsertDevice({
-                    id,
-                    accountId: null,
-                    secretHash: sha256(secret),
-                    name: String(payload.deviceName || id).substring(0, 60),
-                    enrolledAt: Date.now()
-                });
-                console.log(`[WS] New device enrolled (unclaimed): ${id}`);
-                addLog(null, 'Android Uygulaması', id, 'Cihaz Kaydoldu', 'info', 'Sahipsiz — panelden bir hesaba bağlanmayı bekliyor.');
-            }
 
-            deviceId = id;
-            const clientLimitRejected = [];
-
-            // The device is the authority on which clients exist. Rebuild its
-            // slice of the registry from what it just told us.
-            if (Array.isArray(payload.clients)) {
-                const list = [];
-                payload.clients.forEach((c) => {
-                    if (!c || typeof c !== 'object' || Array.isArray(c)) return;
-                    const cid = String(c.clientId || '').trim();
-                    const hash = String(c.secretHash || '').trim();
-                    if (cid && /^[a-f0-9]{64}$/i.test(hash)) {
-                        list.push({ id: cid, secretHash: hash, name: String(c.name || 'AI istemcisi').substring(0, 60) });
+                const known = await store.getDevice(id);
+                if (known) {
+                    if (!safeEquals(sha256(secret), known.secretHash)) {
+                        console.warn(`[WS] Rejected register for '${id}': device secret mismatch.`);
+                        addLog(null, 'Bilinmeyen', id, 'Reddedilen Kayıt', 'error', 'Cihaz sırrı eşleşmedi.');
+                        return fail('Cihaz sırrı eşleşmiyor');
                     }
-                });
-                const registeredDevice = await store.getDevice(id);
-                const accountId = registeredDevice?.accountId;
-                let remaining = accountId
-                    ? Math.max(0, (await clientCreationLimit(accountId)) - await store.countClients(accountId))
-                    : Number.MAX_SAFE_INTEGER;
-                const allowedList = list.filter((client) => {
-                    if (clients.has(client.id)) return true;
-                    if (remaining > 0) { remaining--; return true; }
-                    clientLimitRejected.push(client.id);
-                    return false;
-                });
-                const reconciliation = await store.replaceDeviceClients(id, allowedList);
-                if (limits.FEATURES.cloudBackupUploads) await store.publishDeviceClients(accountId, id);
-                if (reconciliation && reconciliation.conflicts && reconciliation.conflicts.length > 0) {
-                    console.warn(`[WS] Device '${id}' could not bind conflicting clients: ${reconciliation.conflicts.join(', ')}`);
+                    await store.upsertDevice({
+                        id,
+                        secretHash: known.secretHash,
+                        name: String(payload.deviceName || known.name || id).substring(0, 60)
+                    });
+                } else {
+                    if (await store.countAllDevices() >= MAX_REGISTERED_DEVICES) {
+                        return fail('Yeni cihaz kayıt kapasitesi dolu. Sunucu operatörüyle iletişime geçin.');
+                    }
+                    const ipGate = limits.hit('deviceEnroll', connectionIp);
+                    const globalGate = ipGate.allowed && limits.hit('deviceEnrollGlobal', 'relay');
+                    if (!ipGate.allowed || !globalGate.allowed) {
+                        return fail('Yeni cihaz kayıt sınırına ulaşıldı. Daha sonra tekrar deneyin.');
+                    }
+                    // Trust on first use used to be the whole enrolment story, and it
+                    // was only survivable because the registry was one operator's
+                    // own phone: lose the state file and every deviceId was up for
+                    // grabs again — including the chance to wipe a real device's
+                    // client list by registering an empty one.
+                    //
+                    // The durable store closes that window, and a claim code puts
+                    // the device under an account. An unclaimed device still routes
+                    // commands, because routing needs a client secret only the real
+                    // phone can mint, and refusing would break every install that
+                    // upgrades into this version. What it does not get is a place
+                    // in anyone's panel until its owner claims it.
+                    await store.upsertDevice({
+                        id,
+                        accountId: null,
+                        secretHash: sha256(secret),
+                        name: String(payload.deviceName || id).substring(0, 60),
+                        enrolledAt: Date.now()
+                    });
+                    console.log(`[WS] New device enrolled (unclaimed): ${id}`);
+                    addLog(null, 'Android Uygulaması', id, 'Cihaz Kaydoldu', 'info', 'Sahipsiz — panelden bir hesaba bağlanmayı bekliyor.');
                 }
-            }
-            await store.touchDevice(id, Date.now());
-            if (payload.managementPublicKey !== undefined) {
-                if (!management.validPublicKey(payload.managementPublicKey) ||
-                    !await store.setDeviceManagementKey(id, payload.managementPublicKey)) return fail('Cihaz yetki anahtarı eşleşmiyor');
-            }
-            await refreshRegistryCache();
-            if (ws.readyState !== 1) return;
-            authenticated = true;
-            clearTimeout(authDeadline);
-            releaseUnauthenticatedSlot();
-            limits.reset('websocket', connectionIp);
 
-            const existing = browsers.get(id);
-            if (existing && existing !== ws) {
-                try { existing.close(1000, 'Yeni bağlantı ile değiştirildi'); } catch (e) {}
-            }
-            browsers.set(id, ws);
+                deviceId = id;
+                const clientLimitRejected = [];
 
-            const record = devices.get(id);
-            const mine = [...clients.values()].filter((c) => boundDeviceIds(c).includes(id)).length;
-            addLog(null, 'Android Uygulaması', id, 'Cihaz Bağlandı', 'success', `${mine} eşleştirilmiş istemci bildirildi.`);
-            ws.send(JSON.stringify({
-                type: 'register_ack',
-                deviceId: id,
-                status: 'success',
-                claimed: !!(record && record.accountId),
-                guestId: record?.guestId || null,
-                maxResponseBytes: MAX_DEVICE_RESPONSE_BYTES,
-                backupManagementVersion: 1,
-                clientLimitRejected,
-                catalog: await activeQuickLinkCatalogue()
-            }));
-            return;
+                // The device is the authority on which clients exist. Rebuild its
+                // slice of the registry from what it just told us.
+                if (Array.isArray(payload.clients)) {
+                    const list = [];
+                    const seen = new Set();
+                    payload.clients.forEach((c) => {
+                        if (!c || typeof c !== 'object' || Array.isArray(c)) return;
+                        const cid = String(c.clientId || '').trim();
+                        const hash = String(c.secretHash || '').trim();
+                        if (cid && cid.length <= 128 && !seen.has(cid) && /^[a-f0-9]{64}$/i.test(hash)) {
+                            seen.add(cid);
+                            list.push({ id: cid, secretHash: hash, name: String(c.name || 'AI istemcisi').substring(0, 60) });
+                        }
+                    });
+                    const registeredDevice = await store.getDevice(id);
+                    const accountId = registeredDevice?.accountId;
+                    const existingIds = new Set(await store.existingClientIds(list.map(c => c.id)));
+                    const boundIds = new Set(await store.deviceClientIds(id));
+                    let remaining = accountId
+                        ? Math.max(0, (await clientCreationLimit(accountId)) - await store.countClients(accountId))
+                        : Math.max(0, MAX_UNCLAIMED_CLIENTS - list.filter(c => boundIds.has(c.id)).length);
+                    let globalRemaining = Math.max(0, MAX_REGISTERED_CLIENTS - await store.countAllClients());
+                    const allowedList = list.filter((client) => {
+                        if (existingIds.has(client.id)) return true;
+                        if (remaining > 0 && globalRemaining > 0) { remaining--; globalRemaining--; return true; }
+                        clientLimitRejected.push(client.id);
+                        return false;
+                    });
+                    const reconciliation = await store.replaceDeviceClients(id, allowedList);
+                    if (limits.FEATURES.cloudBackupUploads) await store.publishDeviceClients(accountId, id);
+                    if (reconciliation && reconciliation.conflicts && reconciliation.conflicts.length > 0) {
+                        console.warn(`[WS] Device '${id}' could not bind conflicting clients: ${reconciliation.conflicts.join(', ')}`);
+                    }
+                }
+                await store.touchDevice(id, Date.now());
+                if (payload.managementPublicKey !== undefined) {
+                    if (!management.validPublicKey(payload.managementPublicKey) ||
+                        !await store.setDeviceManagementKey(id, payload.managementPublicKey)) return fail('Cihaz yetki anahtarı eşleşmiyor');
+                }
+                await refreshRegistryCache();
+                if (ws.readyState !== 1) return;
+                authenticated = true;
+                clearTimeout(authDeadline);
+                releaseUnauthenticatedSlot();
+
+                const existing = browsers.get(id);
+                if (existing && existing !== ws) {
+                    try { existing.close(1000, 'Yeni bağlantı ile değiştirildi'); } catch (e) {}
+                }
+                browsers.set(id, ws);
+
+                const record = devices.get(id);
+                const mine = [...clients.values()].filter((c) => boundDeviceIds(c).includes(id)).length;
+                addLog(null, 'Android Uygulaması', id, 'Cihaz Bağlandı', 'success', `${mine} eşleştirilmiş istemci bildirildi.`);
+                ws.send(JSON.stringify({
+                    type: 'register_ack',
+                    deviceId: id,
+                    status: 'success',
+                    claimed: !!(record && record.accountId),
+                    guestId: record?.guestId || null,
+                    maxResponseBytes: MAX_DEVICE_RESPONSE_BYTES,
+                    backupManagementVersion: 1,
+                    clientLimitRejected,
+                    catalog: await activeQuickLinkCatalogue()
+                }));
+                return;
+            });
         }
 
         if (!authenticated || browsers.get(deviceId) !== ws) return;
@@ -2125,44 +2181,53 @@ wss.on('connection', (ws, request) => {
         // The device minted a credential locally and is telling us the hash so
         // it works immediately, without waiting for the next register.
         if (payload.type === 'client_added') {
-            const cid = String(payload.clientId || '').trim();
-            const hash = String(payload.secretHash || '').trim();
-            if (!cid || !/^[a-f0-9]{64}$/i.test(hash)) return;
-            const source = devices.get(deviceId);
-            if (!(await mayCreateClient(source?.accountId, cid))) {
-                const maximum = await clientCreationLimit(source.accountId);
-                addLog(cid, payload.name, deviceId, 'AI Oturumu Limiti', 'quota', `Plan en fazla ${maximum} yeni AI bağlantısına izin veriyor.`);
-                try {
-                    ws.send(JSON.stringify({
-                        type: 'client_limit_rejected',
-                        clientId: cid,
-                        maximum,
-                        reason: `Planınız en fazla ${maximum} AI bağlantısına izin veriyor.`
-                    }));
-                } catch (e) {}
+            return serializeRegistryMutation(async () => {
+                if (ws.readyState !== 1 || browsers.get(deviceId) !== ws) return;
+                const cid = String(payload.clientId || '').trim();
+                const hash = String(payload.secretHash || '').trim();
+                if (!cid || cid.length > 128 || !/^[a-f0-9]{64}$/i.test(hash)) return;
+                const source = await store.getDevice(deviceId);
+                if (!(await mayCreateClient(source?.accountId, cid, deviceId))) {
+                    const maximum = Math.min(MAX_REGISTERED_CLIENTS,
+                        source?.accountId ? await clientCreationLimit(source.accountId) : MAX_UNCLAIMED_CLIENTS);
+                    const reason = await store.countAllClients() >= MAX_REGISTERED_CLIENTS
+                        ? 'Sunucunun AI bağlantısı kapasitesi dolu. Sunucu operatörüyle iletişime geçin.'
+                        : source?.accountId
+                            ? `Planınız en fazla ${maximum} AI bağlantısına izin veriyor. Uygulamada mevcut bağlantıları yönetin.`
+                            : `Hesaba bağlı olmayan cihaz en fazla ${maximum} AI bağlantısı oluşturabilir. Uygulamada hesaba giriş yapın veya mevcut bağlantıları yönetin.`;
+                    addLog(cid, payload.name, deviceId, 'AI Oturumu Limiti', 'quota', reason);
+                    try {
+                        ws.send(JSON.stringify({
+                            type: 'client_limit_rejected',
+                            clientId: cid,
+                            maximum,
+                            reason
+                        }));
+                    } catch (e) {}
+                    return;
+                }
+                const stored = await store.upsertClient({
+                    id: cid,
+                    deviceId,
+                    secretHash: hash,
+                    name: String(payload.name || 'AI istemcisi').substring(0, 60)
+                });
+                if (!stored) {
+                    addLog(cid, payload.name, deviceId, 'İstemci Bağı Reddedildi', 'error', 'Kimlik başka hesaba ait veya anahtar özeti eşleşmiyor.');
+                    try {
+                        ws.send(JSON.stringify({
+                            type: 'client_sync_rejected',
+                            clientId: cid,
+                            reason: 'Bu AI bağlantısı başka bir hesaba ait veya anahtarı eşleşmiyor.'
+                        }));
+                    } catch (e) {}
+                    return;
+                }
+                await refreshRegistryCache();
+                if (limits.FEATURES.cloudBackupUploads) await store.publishDeviceClients(stored.accountId, deviceId);
+                addLog(cid, payload.name, deviceId, 'İstemci Eklendi', 'success', 'Cihaz yeni bir erişim anahtarı üretti.');
                 return;
-            }
-            const stored = await store.upsertClient({
-                id: cid,
-                deviceId,
-                secretHash: hash,
-                name: String(payload.name || 'AI istemcisi').substring(0, 60)
             });
-            if (!stored) {
-                addLog(cid, payload.name, deviceId, 'İstemci Bağı Reddedildi', 'error', 'Kimlik başka hesaba ait veya anahtar özeti eşleşmiyor.');
-                try {
-                    ws.send(JSON.stringify({
-                        type: 'client_sync_rejected',
-                        clientId: cid,
-                        reason: 'Bu AI bağlantısı başka bir hesaba ait veya anahtarı eşleşmiyor.'
-                    }));
-                } catch (e) {}
-                return;
-            }
-            await refreshRegistryCache();
-            if (limits.FEATURES.cloudBackupUploads) await store.publishDeviceClients(stored.accountId, deviceId);
-            addLog(cid, payload.name, deviceId, 'İstemci Eklendi', 'success', 'Cihaz yeni bir erişim anahtarı üretti.');
-            return;
         }
 
         if (payload.type === 'revoke_client') {
@@ -3212,6 +3277,11 @@ function sendAuthorizationCallback(res, callbackUrl, language = 'tr') {
 
 app.get('/oauth/authorize', async (req, res) => {
     oauthAuthorizeHeaders(res);
+    const metadataGate = limits.hit('metadata', limits.clientIp(req));
+    if (!metadataGate.allowed) {
+        res.setHeader('Retry-After', String(metadataGate.retryAfterSeconds));
+        return res.status(429).send('Çok fazla yetkilendirme isteği. Daha sonra tekrar deneyin.');
+    }
     const language = oauthRequestLanguage(req);
     const parsed = await readAuthorizeRequest(req.query || {}, oauth.originOf(req));
     if (parsed.fail) {
@@ -3236,6 +3306,11 @@ app.get('/oauth/authorize', async (req, res) => {
 
 app.post('/oauth/authorize', async (req, res) => {
     oauthAuthorizeHeaders(res);
+    const metadataGate = limits.hit('metadata', limits.clientIp(req));
+    if (!metadataGate.allowed) {
+        res.setHeader('Retry-After', String(metadataGate.retryAfterSeconds));
+        return res.status(429).send('Çok fazla yetkilendirme isteği. Daha sonra tekrar deneyin.');
+    }
     const language = oauthRequestLanguage(req);
     // Claude's hosted connector browser can submit only the visible code field
     // and omit hidden inputs. The form action carries the same OAuth context in
