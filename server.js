@@ -10,6 +10,7 @@ const { openStore, recoveryCodeVerifier } = require('./lib/store');
 const accounts = require('./lib/auth');
 const panel = require('./lib/panel');
 const { PLAN_CATALOG_VERSION, resolvePaidPlan, planExpiry } = require('./lib/plan-catalog');
+const { membershipGuide } = require('./lib/membership-guide');
 const oauth = require('./lib/oauth');
 const { cataloguePayload } = require('./lib/quick-links');
 const { quickLinkReportRange, quickLinkReport } = require('./lib/quick-link-analytics');
@@ -415,28 +416,33 @@ function recordToolUsage(auth, toolName, status, durationMs = 0) {
 }
 
 // Standard MCP Tools schema
+// Schemas contain constraints; AI_TOOL_COPY below is the single source of English copy.
 const TOOLS = [
     {
         name: "browser_get_tool_documentation",
-        description: "Android Tarayıcı MCP Köprüsündeki tüm araçların (tools) detaylı kullanım kılavuzunu, parametrelerini, örnek çağrılarını ve en iyi ajansal iş akışlarını (Agent Best Practices / Playbooks) döner. Bir aracın nasıl çalıştığını öğrenmek veya karmaşık web otomasyon adımlarını planlamak için bu aracı çağırın.",
         inputSchema: {
             type: "object",
             properties: {
-                tool_name: { 
-                    type: "string", 
-                    description: "Hakkında detaylı bilgi ve örnek iş akışı istenen aracın adı (örn. 'browser_get_markdown', 'browser_click', 'browser_type', 'browser_search', 'browser_navigate', 'all'). Boş bırakılırsa tüm araçların tam rehberini döner." 
+                tool_name: {
+                    type: "string"
                 },
-                category: { 
-                    type: "string", 
-                    enum: ["all", "navigation", "interaction", "content_extraction", "tabs_and_sessions", "meta"],
-                    description: "Araç kategorisine göre filtreleme ('all', 'navigation', 'interaction', 'content_extraction', 'tabs_and_sessions', 'meta')" 
+                category: {
+                    type: "string",
+                    enum: [
+                        "all",
+                        "navigation",
+                        "interaction",
+                        "content_extraction",
+                        "tabs_and_sessions",
+                        "meta",
+                        "membership"
+                    ]
                 }
             }
         }
     },
     {
         name: "browser_list_devices",
-        description: "Bu AI bağlantısının kullanmasına izin verilmiş Android cihazlarını listeler. Her cihaz için cihaz kimliği, kullanıcıya görünen ad, çevrimiçi durum ve varsayılan hedef olup olmadığı döner. Birden fazla telefon varsa diğer browser_* araçlarında deviceId vermeden önce bunu çağırın. Bu araç yeni bir cihaza yetki vermez.",
         inputSchema: {
             type: "object",
             properties: {}
@@ -444,374 +450,632 @@ const TOOLS = [
     },
     {
         name: "browser_navigate",
-        description: "Belirtilen adresi açar ve sayfa yerleştiğinde **ne bulduğunu** döner: yönlendirme sonrası gerçek adres, sayfa başlığı, başlık listesi ('headings'), link/form/giriş alanı sayıları ve sayfanın karakter uzunluğu. Bu özet, içeriği okumadan önce 'aradığım şey burada mı' sorusunu yanıtlamak içindir — gerekiyorsa 'browser_get_markdown' ile okuyun, ya da doğrudan tıklamaya/yazmaya geçin. İçeriği tek turda istiyorsanız 'read' parametresini true verin. Sayfa 6 saniyede yerleşmezse yanıt 'still_loading' durumuyla eldeki özeti döner; bu bir hata değildir.",
         inputSchema: {
             type: "object",
             properties: {
-                url: { type: "string", description: "Gidilecek tam adres (http veya https)" },
-                read: { type: "boolean", description: "true verilirse sayfanın Markdown içeriği de aynı yanıtta döner. Varsayılan false: çoğu gezinme bir ara adımdır ve içeriği boşuna taşımak hem yavaş hem pahalıdır." },
-                offset: { type: "integer", minimum: 0, description: "'read' true iken okunacak Markdown parçasının başlangıç karakteri." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                url: {
+                    type: "string"
+                },
+                read: {
+                    type: "boolean"
+                },
+                offset: {
+                    type: "integer",
+                    minimum: 0
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["url"]
+            required: [
+                "url"
+            ]
         }
     },
     {
         name: "browser_reload",
-        description: "Aktif sekmedeki mevcut belgeyi tarayıcının gerçek yenileme işlemiyle yeniden yükler ve sayfa yerleştiğinde başlık, gerçek adres, başlık listesi ve öğe sayılarını döner. Aynı URL'ye browser_navigate çağırmaktan farklı olarak mevcut tarayıcı girişini yeniler. Bayat içerik veya geçici yükleme hatasında kullanın; CAPTCHA ya da işlem sonucunu değiştirmek için art arda yenilemeyin. İçeriği de aynı yanıtta almak için read=true verin.",
         inputSchema: {
             type: "object",
             properties: {
-                read: { type: "boolean", description: "true verilirse yenilenen sayfanın Markdown içeriği de aynı yanıtta döner." },
-                offset: { type: "integer", minimum: 0, description: "'read' true iken okunacak Markdown parçasının başlangıç karakteri." },
-                tabId: { type: "string", description: "Yenilenecek sekmenin ID'si (opsiyonel, verilmezse aktif sekme)." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                read: {
+                    type: "boolean"
+                },
+                offset: {
+                    type: "integer",
+                    minimum: 0
+                },
+                tabId: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_search",
-        description: "Google'da arama yapar ve sonuç sayfasının özetini döner: başlık, başlık listesi, link sayısı ve sayfa uzunluğu. Sonuçları okumak için 'browser_get_markdown' çağırın veya 'read' parametresini true verin.",
         inputSchema: {
             type: "object",
             properties: {
-                query: { type: "string", description: "Aranacak kelime veya cümle" },
-                read: { type: "boolean", description: "true verilirse sonuç sayfasının Markdown içeriği de aynı yanıtta döner." },
-                offset: { type: "integer", minimum: 0, description: "'read' true iken okunacak Markdown parçasının başlangıç karakteri." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                query: {
+                    type: "string"
+                },
+                read: {
+                    type: "boolean"
+                },
+                offset: {
+                    type: "integer",
+                    minimum: 0
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["query"]
+            required: [
+                "query"
+            ]
         }
     },
     {
         name: "browser_screenshot",
-        description: "Sekmenin görüntüsünü JPEG olarak alır ve MCP görüntü bloğu olarak döner. grid=true verilirse görünen alan varsayılan olarak yaklaşık 48 px karelerden oluşan 15×24 yarı saydam hücreye ayrılır, A1..O24 etiketleri ve 30 saniyelik tek kullanımlık screenshot_id döner; grid_columns/grid_rows ile yoğunluk isteğe göre değiştirilebilir. Ardından browser_click_at ile hücreye veya kesin piksele fiziksel dokunabilirsiniz. Grid yalnızca görünür alan içindir ve fullPage'i geçersiz kılar. Android yalnızca ekranda olan bir WebView'ı çizdiği için arka plandaki sekme, uygulama ön plandaysa bir anlığına gösterilip geri alınır. Uygulama ön planda değilse blank_capture döner.",
         inputSchema: {
             type: "object",
             properties: {
-                fullPage: { type: "boolean", description: "true ise yalnızca görünen alan yerine sayfanın tamamı yakalanır. Telefonda o an ekranda olan sekmede yok sayılır (yanıt 'full_page' alanında hangisinin alındığını bildirir)." },
-                grid: { type: "boolean", description: "true ise görüntünün üzerine koordinat hücreleri çizer ve browser_click_at için screenshot_id üretir. Grid modunda fullPage yok sayılır." },
-                grid_columns: { type: "integer", minimum: 4, maximum: 26, description: "Grid sütun sayısı. Varsayılan 15; sütunlar A-Z ile adlandırılır." },
-                grid_rows: { type: "integer", minimum: 4, maximum: 40, description: "Grid satır sayısı. Varsayılan 24." },
-                tabId: { type: "string", description: "Hedef sekme ID'si (opsiyonel, verilmezse oturumun aktif sekmesi)" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                fullPage: {
+                    type: "boolean"
+                },
+                grid: {
+                    type: "boolean"
+                },
+                grid_columns: {
+                    type: "integer",
+                    minimum: 4,
+                    maximum: 26
+                },
+                grid_rows: {
+                    type: "integer",
+                    minimum: 4,
+                    maximum: 40
+                },
+                tabId: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_get_html",
-        description: "Açık sayfanın HTML kaynağını, URL'sini ve başlığını alır. Büyük kaynaklar bölümlenir; has_more varsa next_offset ile devam edin.",
         inputSchema: {
             type: "object",
             properties: {
-                offset: { type: 'integer', minimum: 0, description: 'HTML bölümünün başlangıç karakteri; devam için next_offset kullanın.' },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                offset: {
+                    type: "integer",
+                    minimum: 0
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_get_markdown",
-        description: "Şu an açık olan sayfanın Markdown içeriğini (`markdown`) alır. Dönüşüm cihazda yapılır: çıktı düz bir metin dökümü değil, tıklanabilir öğelerin numaralandırıldığı bir etkileşim haritasıdır — buradaki ID sayılarını doğrudan `browser_click` ve `browser_type` ile kullanabilirsiniz. Şifre, kart ve OTP alanlarının değerleri asla okunmaz. Telefonda token tasarrufu açıksa yanıt 80.000 karakterlik parçalara ayrılır; `has_more` true olduğunda `next_offset` değeriyle devam edin.",
         inputSchema: {
             type: "object",
             properties: {
-                offset: { type: "integer", minimum: 0, description: "Token tasarrufu açıkken okunacak Markdown parçasının başlangıç karakteri. İlk çağrıda 0 veya boş bırakın; devam için önceki yanıttaki next_offset değerini verin." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                offset: {
+                    type: "integer",
+                    minimum: 0
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_scroll",
-        description: "Sayfayı yukarı veya aşağı kaydırır.",
         inputSchema: {
             type: "object",
             properties: {
-                direction: { type: "string", enum: ["up", "down"], description: "Kaydırma yönü ('up' veya 'down', varsayılan 'down')" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                direction: {
+                    type: "string",
+                    enum: [
+                        "up",
+                        "down"
+                    ]
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_click",
-        description: "Bir öğeye tıklar. Tıklama gerçek bir işaretçi dizisi olarak gönderilir (pointerdown → mousedown → pointerup → mouseup → click), çünkü takvimler, açılır menüler ve yolcu seçiciler gibi özel bileşenler yalnızca 'click' olayını değil bu zinciri dinler. Yanıt, tıklamanın **etkisi olup olmadığını** söyler: 'page_changed', adres değiştiyse 'new_url', bir öneri listesi açıldıysa 'suggestions'. 'page_changed' false ise öğe bulunmuştur ama beklenen etkiyi yapmamıştır — aynı tıklamayı tekrarlamak yerine sayfayı yeniden okuyun. Element numaraları 'browser_get_markdown' geçişinde atanır; sayfa değiştiyse numaralar reddedilir ve yeniden okumanız istenir.",
         inputSchema: {
             type: "object",
             properties: {
-                selector: { type: "string", description: "Markdown çıktısındaki element ID sayısı (ör. '12') veya bir CSS seçici. Sayı kullanmak daha güvenilirdir." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                selector: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["selector"]
+            required: [
+                "selector"
+            ]
         }
     },
     {
         name: "browser_click_at",
-        description: "browser_screenshot(grid=true) çıktısındaki tek kullanımlık screenshot_id ile WebView'a gerçek Android dokunuşu gönderir. DOM numarasıyla browser_click standart ve daha güvenilir yöntemdir; bu aracı canvas, harita, cross-origin iframe veya seçiciyle bulunamayan görsel kontroller için kullanın. Ya cell ('H12') ve isteğe bağlı hücre içi x_ratio/y_ratio, ya da görüntü pikseli olarak x/y verin. Sayfa adresi, kaydırma, görünür alan veya 30 saniyelik süre değiştiyse stale_screenshot ile reddeder. <select>, disabled ve dosya yükleme alanları güvenli alternatifleriyle birlikte reddedilir. Yanıt tıklanan öğeyi ve sayfadaki etkiyi bildirir.",
         inputSchema: {
             type: "object",
             properties: {
-                screenshot_id: { type: "string", description: "browser_screenshot(grid=true) yanıtındaki tek kullanımlık görüntü kimliği." },
-                cell: { type: "string", pattern: "^[A-Za-z][0-9]{1,2}$", description: "Grid hücresi, örn. H12. Verilirse x/y vermeyin." },
-                x_ratio: { type: "number", minimum: 0, maximum: 1, description: "cell içinde soldan konum; varsayılan 0.5 (merkez). Küçük hedeflerde hassaslaştırır." },
-                y_ratio: { type: "number", minimum: 0, maximum: 1, description: "cell içinde yukarıdan konum; varsayılan 0.5 (merkez)." },
-                x: { type: "number", minimum: 0, description: "Dönen JPEG üzerindeki kesin x pikseli. cell ile birlikte kullanmayın." },
-                y: { type: "number", minimum: 0, description: "Dönen JPEG üzerindeki kesin y pikseli. cell ile birlikte kullanmayın." },
-                tabId: { type: "string", description: "Opsiyonel; görüntünün sekmesi kimlikten otomatik bulunur." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                screenshot_id: {
+                    type: "string"
+                },
+                cell: {
+                    type: "string",
+                    pattern: "^[A-Za-z][0-9]{1,2}$"
+                },
+                x_ratio: {
+                    type: "number",
+                    minimum: 0,
+                    maximum: 1
+                },
+                y_ratio: {
+                    type: "number",
+                    minimum: 0,
+                    maximum: 1
+                },
+                x: {
+                    type: "number",
+                    minimum: 0
+                },
+                y: {
+                    type: "number",
+                    minimum: 0
+                },
+                tabId: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["screenshot_id"]
+            required: [
+                "screenshot_id"
+            ],
+            oneOf: [
+                {
+                    required: [
+                        "cell"
+                    ],
+                    not: {
+                        anyOf: [
+                            {
+                                required: [
+                                    "x"
+                                ]
+                            },
+                            {
+                                required: [
+                                    "y"
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    required: [
+                        "x",
+                        "y"
+                    ],
+                    not: {
+                        required: [
+                            "cell"
+                        ]
+                    }
+                }
+            ]
         }
     },
     {
         name: "browser_press_key",
-        description: "Odaktaki (veya belirtilen) öğeye bir tuş gönderir: 'Enter', 'Escape', 'Tab', 'ArrowDown', 'ArrowUp', 'Backspace' gibi. Otomatik tamamlama akışlarının vazgeçilmezi: alana yazdıktan sonra açılan listeden seçmek için ArrowDown + Enter gönderin. 'Enter' bir form alanındayken ve sayfa olayı iptal etmediyse form ayrıca gönderilir ('form_submitted' alanına bakın). Yanıt, tıklamada olduğu gibi etkiyi de bildirir.",
         inputSchema: {
             type: "object",
             properties: {
-                key: { type: "string", description: "Tuş adı: Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Backspace, Delete, Home, End, PageUp, PageDown" },
-                selector: { type: "string", description: "(Opsiyonel) Tuşun gönderileceği öğe. Boş bırakılırsa sayfadaki odaklı öğeye gider — genelde az önce yazdığınız alan." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                key: {
+                    type: "string"
+                },
+                selector: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["key"]
+            required: [
+                "key"
+            ]
         }
     },
     {
         name: "browser_wait_for",
-        description: "Bir öğe görünene veya bir metin sayfada belirene kadar bekler. Tıklamadan sonra sonuçların yüklenmesini beklemek için kullanın; sabit sürelerle tahmin yürütmekten iyidir. Süre dolarsa hata değil 'timeout' durumu döner — bu, beklediğiniz şeyin gelmediği bilgisidir; aynı beklemeyi tekrarlamak yerine sayfayı okuyun.",
         inputSchema: {
             type: "object",
             properties: {
-                selector: { type: "string", description: "Beklenecek CSS seçici veya element ID sayısı." },
-                text: { type: "string", description: "Sayfada görünmesi beklenen metin (büyük/küçük harf duyarsız)." },
-                timeout_ms: { type: "integer", minimum: 500, maximum: 20000, description: "En fazla bekleme süresi. Varsayılan 8000." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
-            }
+                selector: {
+                    type: "string",
+                    minLength: 1
+                },
+                text: {
+                    type: "string",
+                    minLength: 1
+                },
+                timeout_ms: {
+                    type: "integer",
+                    minimum: 500,
+                    maximum: 20000
+                },
+                deviceId: {
+                    type: "string"
+                }
+            },
+            anyOf: [
+                {
+                    required: [
+                        "selector"
+                    ]
+                },
+                {
+                    required: [
+                        "text"
+                    ]
+                }
+            ]
         }
     },
     {
         name: "browser_execute_js",
-        description: "Sayfada özel bir JavaScript kodu çalıştırır ve sonucunu döner. Bu yetki cihazda varsayılan olarak KAPALIDIR; kullanıcı telefondan 'execute_js' iznini açmadıkça çağrı reddedilir.",
         inputSchema: {
             type: "object",
             properties: {
-                script: { type: "string", description: "Çalıştırılacak JS kod satırı" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                script: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["script"]
+            required: [
+                "script"
+            ]
         }
     },
     {
         name: "browser_type",
-        description: "Bir alana metin yazar. Yazma gerçek bir klavye gibi davranır: değer, çatının (React/Vue) kendi izleyicisini fark edeceği şekilde yerel setter üzerinden yazılır ve tuş olayları gönderilir. Arama/otomatik tamamlama görünümlü alanlarda karakter karakter yazılır, çünkü bu alanlar öneri listesini tuş olaylarıyla açar — tek seferde değer atamak listeyi hiç açmaz ve form geçerli bir seçim almamış olur. Yanıtta bir öneri listesi belirdiyse 'suggestions' alanında gelir; oradan numarasıyla tıklayabilir veya ArrowDown + Enter gönderebilirsiniz. Şifre, doğrulama kodu ve ödeme alanları ayrı bir izne bağlıdır.",
         inputSchema: {
             type: "object",
             properties: {
-                selector: { type: "string", description: "Markdown çıktısındaki element ID sayısı veya CSS seçici" },
-                text: { type: "string", description: "Yazılacak metin. Alan doluysa önce temizlenir." },
-                keystroke: { type: "boolean", description: "true verilirse alan arama görünümlü olmasa da karakter karakter yazılır. Öneri listesi açılmıyorsa bunu deneyin." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                selector: {
+                    type: "string"
+                },
+                text: {
+                    type: "string"
+                },
+                keystroke: {
+                    type: "boolean"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["selector", "text"]
+            required: [
+                "selector",
+                "text"
+            ]
         }
     },
     {
         name: "browser_select_option",
-        description: "Bir açılır listede (<select>) seçenek seçer. **Açılır listeler için 'browser_click' kullanmayın**: bir <select>'e tıklamak Android'in kendi seçicisini açar, o pencere sayfanın parçası değildir ve ajan oradan seçim yapamaz — tıklama başarılı görünür ama değer hiç değişmez. Bu araç seçimi doğrudan yapar ve sayfanın 'change' olayını görmesini sağlar. Seçeneğin görünen metnini 'label' ile verin; büyük/küçük harf ve Türkçe karakter farkı önemsizdir. Eşleşme bulunamazsa yanıt mevcut seçenekleri listeler. role=\"listbox\" ile kurulmuş özel menülerde de çalışır, ama önce menünün açık olması gerekir.",
         inputSchema: {
             type: "object",
             properties: {
-                selector: { type: "string", description: "Listenin element ID sayısı (markdown çıktısındaki 'Select #12') veya CSS seçici." },
-                label: { type: "string", description: "Seçilecek seçeneğin görünen metni, ör. 'Türkiye'." },
-                value: { type: "string", description: "(Opsiyonel) option etiketinin value değeri; 'label' yerine kullanılabilir." },
-                index: { type: "integer", description: "(Opsiyonel) Seçeneğin sıra numarası (0'dan başlar)." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                selector: {
+                    type: "string"
+                },
+                label: {
+                    type: "string",
+                    minLength: 1
+                },
+                value: {
+                    type: "string",
+                    minLength: 1
+                },
+                index: {
+                    type: "integer",
+                    minimum: 0
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["selector"]
+            required: [
+                "selector"
+            ],
+            anyOf: [
+                {
+                    required: [
+                        "label"
+                    ]
+                },
+                {
+                    required: [
+                        "value"
+                    ]
+                },
+                {
+                    required: [
+                        "index"
+                    ]
+                }
+            ]
         }
     },
     {
         name: "browser_pick_date",
-        description: "Bir tarih seçer — hem gerçek tarih alanlarında (input type=date) hem de rezervasyon ve uçuş sitelerinin çizdiği takvim bileşenlerinde. Tarihi her zaman YYYY-AA-GG biçiminde verin (ör. '2026-09-15'). Takvim hücrelerinin çoğu ekranda yalnızca gün sayısını gösterir; hangi aya ait olduğunu cihaz çözer, istenen aya kendisi ilerler — takvim ay/yıl açılır listesi sunuyorsa tek adımda oradan, sunmuyorsa ay oklarına basarak — ve doğru hücreye tıklar. Doğum tarihi gibi uzak tarihler de bu yüzden tek çağrıda seçilebilir. Takvim kapalıysa 'selector' olarak tarih alanının numarasını verin, önce o açılır. Gün doluysa/kapalıysa ya da tarih takvimin izin verdiği aralığın dışındaysa yanıt bunu ve görünen aralığı söyler — aynı çağrıyı tekrarlamak yardımcı olmaz.",
         inputSchema: {
             type: "object",
             properties: {
-                date: { type: "string", description: "Seçilecek tarih, YYYY-AA-GG biçiminde. Örn. '2026-09-15'." },
-                selector: { type: "string", description: "(Opsiyonel) Tarih alanının ya da takvimi açan öğenin element ID sayısı. Takvim zaten açıksa gerekmez." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                date: {
+                    type: "string",
+                    pattern: "^\\d{4}-\\d{2}-\\d{2}$"
+                },
+                selector: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["date"]
+            required: [
+                "date"
+            ]
         }
     },
     {
         name: "browser_read_form",
-        description: "Bir formun **güncel durumunu** döner: her alanın numarası, etiketi, tipi, içindeki değer, zorunlu mu, devre dışı/salt okunur mu, açılır listelerin seçenekleri ve varsa doğrulama hataları. Ayrıca hangi zorunlu alanların hâlâ boş olduğunu ('missing_required'), hangilerinin geçersiz olduğunu ('invalid_fields') ve sayfanın gösterdiği uyarıları ('alerts') verir. Form doldururken her adımdan sonra tüm sayfayı 'browser_get_markdown' ile yeniden okumak yerine bunu kullanın: birkaç yüz token tutar ve tam olarak gereken bilgiyi verir. Şifre, kart ve doğrulama kodu alanlarının değerleri okunmaz; yalnızca dolu/boş bilgisi döner.",
         inputSchema: {
             type: "object",
             properties: {
-                selector: { type: "string", description: "(Opsiyonel) Formun ya da içindeki bir alanın element ID sayısı / CSS seçicisi. Boş bırakılırsa sayfadaki en kapsamlı görünür form seçilir." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                selector: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_fill_form",
-        description: "Birden çok alanı tek komutta doldurur. Alan tipi otomatik anlaşılır: metin alanına yazar, açılır listede seçim yapar, onay kutusunu işaretler, gerçek tarih alanına tarihi yazar. Alan alan doldurmaya göre iki üstünlüğü var: tek tur sürer ve kişisel bilgi içeren bir formda kullanıcıya **tek bir onay** çıkar — arka arkaya on onay kutusu, kullanıcının onayları okumayı bırakmasına yol açar. Yanıt her alan için ayrı sonuç döner; doldurulamayanların nedeni 'results' içindedir. Şifre/ödeme alanları yine 'sensitive_fields' iznine bağlıdır. Takvim bileşenleri (gerçek input type=date olmayanlar) bu araçla doldurulamaz; onlar için 'browser_pick_date' kullanın.",
         inputSchema: {
             type: "object",
             properties: {
                 fields: {
                     type: "array",
-                    description: "Doldurulacak alanlar; en fazla 30 tane.",
                     items: {
                         type: "object",
                         properties: {
-                            selector: { type: "string", description: "Alanın element ID sayısı veya CSS seçicisi." },
-                            value: { type: "string", description: "Yazılacak değer. Açılır listede seçeneğin görünen metni, onay kutusunda 'true'/'false', tarih alanında YYYY-AA-GG." }
+                            selector: {
+                                type: "string"
+                            },
+                            value: {
+                                type: "string"
+                            }
                         },
-                        required: ["selector", "value"]
-                    }
+                        required: [
+                            "selector",
+                            "value"
+                        ]
+                    },
+                    minItems: 1,
+                    maxItems: 30
                 },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["fields"]
+            required: [
+                "fields"
+            ]
         }
     },
     {
         name: "browser_handle_dialog",
-        description: "Sayfanın açacağı **bir sonraki** tarayıcı iletişim kutusunun (alert / confirm / prompt) nasıl yanıtlanacağını önceden belirler. Bu kutular sayfanın JavaScript'ini bloke eder: biri açıkken hiçbir komut çalışamaz ve hiçbir yanıt dönemez, bu yüzden karar kutu açılmadan verilir. Varsayılan davranış: 'alert' kabul edilir, 'confirm' ve 'prompt' reddedilir. Bir işlemin yanıtında 'dialog' alanını gördüyseniz ve farklı yanıtlamak istiyorsanız bu aracı çağırıp aynı işlemi tekrarlayın. Ayar 2 dakika ya da ilk kullanım kadar geçerlidir.",
         inputSchema: {
             type: "object",
             properties: {
-                accept: { type: "boolean", description: "true ise kutu kabul edilir (Tamam), false ise reddedilir (İptal). Varsayılan true." },
-                text: { type: "string", description: "(Opsiyonel) 'prompt' kutusuna yazılacak metin." },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                accept: {
+                    type: "boolean"
+                },
+                text: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_toggle_overlay",
-        description: "Ekrandaki interaktif elementlerin üzerine Vimium-style görsel numaralandırma etiketleri (overlay) ekler veya kaldırır.",
         inputSchema: {
             type: "object",
             properties: {
-                enabled: { type: "boolean", description: "Overlay açık (true) veya kapalı (false) olsun" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                enabled: {
+                    type: "boolean"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["enabled"]
+            required: [
+                "enabled"
+            ]
         }
     },
     {
         name: "browser_new_tab",
-        description: "Mevcut AI oturumunda yeni bir sekme açar.",
         inputSchema: {
             type: "object",
             properties: {
-                url: { type: "string", description: "Açılacak URL adresi (opsiyonel, varsayılan google.com)" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                url: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_close_tab",
-        description: "Mevcut AI oturumunda bir sekkeyi veya aktif sekkeyi kapatır.",
         inputSchema: {
             type: "object",
             properties: {
-                tabId: { type: "string", description: "Kapatılacak sekme ID'si (opsiyonel, belirtilmezse aktif sekme kapatılır)" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                tabId: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_list_tabs",
-        description: "Bu AI oturumuna ait tüm açık sekmeleri listeler.",
         inputSchema: {
             type: "object",
             properties: {
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_switch_tab",
-        description: "Belirtilen sekmeye geçiş yapar.",
         inputSchema: {
             type: "object",
             properties: {
-                tabId: { type: "string", description: "Geçiş yapılacak sekme ID'si" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                tabId: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["tabId"]
+            required: [
+                "tabId"
+            ]
         }
     },
     {
         name: "browser_list_shortcuts",
-        description: "Hizmet yönetiminin AI tarayıcı görevleri için seçtiği önerilen siteleri, ne için uygun olduklarını anlatan kısa açıklamalarla kategori kategori döner. Daha az sayfa okuma ve etkileşimle daha hızlı sonuç ve daha düşük token tüketimi hedeflenir. Bunlar zorunlu değildir; AI istediği siteyi kullanabilir. Birini seçtiğinizde URL'yi yeniden yazmayın veya aramayın, affiliate parametrelerini korumak için shortcutId ile browser_open_shortcut çağırın. Sayfaya dokunmaz ve izin gerektirmez.",
         inputSchema: {
             type: "object",
             properties: {
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_open_shortcut",
-        description: "browser_list_shortcuts sonucundan AI'nin kendisinin seçtiği önerilen siteyi shortcutId ile açar. Otomatik eşleştirme veya yönlendirme yapmaz. Adresi katalogdan telefon çözer; böylece affiliate URL'si ve parametreleri AI tarafından yeniden yazılmadan aynen kullanılır. Normal gezinme izni gerekir.",
         inputSchema: {
             type: "object",
             properties: {
-                shortcutId: { type: "string", description: "browser_list_shortcuts sonucundaki sabit kısayol kimliği" },
-                read: { type: "boolean", description: "true ise açılan sayfanın Markdown içeriğini aynı yanıtta döner" },
-                offset: { type: "integer", minimum: 0, description: "read=true iken Markdown parçasının başlangıç karakteri" },
-                tabId: { type: "string", description: "Hedef sekme ID'si (opsiyonel)" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                shortcutId: {
+                    type: "string"
+                },
+                read: {
+                    type: "boolean"
+                },
+                offset: {
+                    type: "integer",
+                    minimum: 0
+                },
+                tabId: {
+                    type: "string"
+                },
+                deviceId: {
+                    type: "string"
+                }
             },
-            required: ["shortcutId"]
+            required: [
+                "shortcutId"
+            ]
         }
     },
     {
         name: "browser_get_session_info",
-        description: "Mevcut tarayıcı oturumunun ve profilinin bilgilerini (Oturum ID, Güvenlik Token'ı, Çerez Durumu, İstemci Adı ve Sekme Sayısı) getirir.",
         inputSchema: {
             type: "object",
             properties: {
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_list_sessions",
-        description: "Kendi oturumunuzu listeler. Oturum izolasyonu mimari olarak zorunludur: başka bir istemcinin veya kullanıcının oturumu hiçbir ayarla görünür hale gelmez.",
         inputSchema: {
             type: "object",
             properties: {
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     },
     {
         name: "browser_clear_session_data",
-        description: "Kendi oturumunuzun çerezlerini, önbelleğini ve gezinti geçmişini temizler. Bu yetki cihazda varsayılan olarak KAPALIDIR ve yalnızca kendi profilinize uygulanabilir.",
         inputSchema: {
             type: "object",
             properties: {
-                clearCookies: { type: "boolean", description: "Çerezleri sil (Varsayılan: true)" },
-                clearCache: { type: "boolean", description: "Önbelleği sil (Varsayılan: true)" },
-                clearHistory: { type: "boolean", description: "Geçmişi sil (Varsayılan: true)" },
-                deviceId: { type: "string", description: "Hedef cihaz ID'si (opsiyonel)" }
+                clearCookies: {
+                    type: "boolean"
+                },
+                clearCache: {
+                    type: "boolean"
+                },
+                clearHistory: {
+                    type: "boolean"
+                },
+                deviceId: {
+                    type: "string"
+                }
             }
         }
     }
 ];
 
-// This is the copy exposed to MCP clients. Keep it in English even when the
-// owner-facing Android and operator interfaces are localized: these strings
-// are instructions for models, not UI labels for the phone owner.
 const AI_TOOL_COPY = {
     browser_get_tool_documentation: {
-        description: "Returns the complete operating guide for this Android browser: tool parameters, recommended workflows, form-filling rules, shortcut usage, CAPTCHA handling, safety boundaries, and recovery guidance. Call it with a tool name for focused help or with 'all' for the full browser playbook.",
+        description: "Returns the English operating guide for this Android browser: tool parameters, workflows, form rules, shortcuts, CAPTCHA handling, safety, recovery, and Tabrove Plus/Pro membership information. Use a tool name for focused help, 'membership' for current plan limits and planned Pro benefits, or 'all' for the complete guide.",
         params: {
-            tool_name: "Tool to document, for example 'browser_fill_form', 'browser_click', or 'all'. Defaults to 'all'.",
-            category: "Optional category filter: 'all', 'navigation', 'interaction', 'content_extraction', 'tabs_and_sessions', or 'meta'."
+            tool_name: "Tool to document, for example 'browser_fill_form' or 'browser_click'; 'membership' for Plus/Pro information; 'all' for the full guide. Defaults to 'all'.",
+            category: "Optional filter: 'all', 'navigation', 'interaction', 'content_extraction', 'tabs_and_sessions', 'meta', or 'membership'."
         },
         bestPractice: "Read the full guide before a complex browsing task, or request one tool when a response tells you to change strategy."
     },
@@ -900,7 +1164,7 @@ const AI_TOOL_COPY = {
         bestPractice: "Call before filling and again before submission. Use it instead of repeatedly reading the entire page."
     },
     browser_fill_form: {
-        description: "Fills up to 30 fields in one call, automatically handling text, native selects, checkboxes, and native date inputs. It produces one owner approval for the whole form when personal data is involved. Custom calendar widgets and autocomplete choices need their dedicated tools.",
+        description: "Fills 1-30 fields in one call, handling text, native selects, checkboxes, and native date inputs. Personal data prompts once for the whole form unless the owner enabled unattended mode. Password, OTP, and payment fields additionally require sensitive_fields permission and follow the client's credential-approval setting. Custom calendars and autocomplete choices need dedicated tools.",
         params: { fields: "Array of {selector, value} entries, up to 30." },
         fieldParams: { selector: "Field numeric ID or CSS selector.", value: "Text; option label for selects; 'true'/'false' for checkboxes; YYYY-MM-DD for native dates." },
         bestPractice: "Read the form, bulk-fill ordinary fields, handle autocomplete and custom calendars separately, then read the form again before submitting."
@@ -952,12 +1216,22 @@ const AI_TOOL_COPY = {
         bestPractice: "Do not attempt to find or switch to another AI client's session."
     },
     browser_clear_session_data: {
-        description: "Clears cookies, cache, and/or browsing history only for this AI connection's isolated profile. clear_data permission is disabled by default and the owner must approve the destructive action.",
+        description: "Clears cookies, cache, and/or browsing history only for this AI connection's isolated profile. clear_data permission is disabled by default. The destructive action requires owner approval unless the owner has explicitly enabled unattended mode for this connection.",
         params: { clearCookies: "Clear cookies; default true.", clearCache: "Clear cache; default true.", clearHistory: "Clear browsing history; default true." },
         bestPractice: "Warn that sign-ins may be lost and never retry after denial without first speaking to the owner."
     }
 };
 
+// MCP annotations are advisory metadata, never a replacement for phone gates.
+const READ_ONLY_TOOLS = new Set([
+    'browser_get_tool_documentation', 'browser_list_devices', 'browser_get_html',
+    'browser_get_markdown', 'browser_read_form', 'browser_list_tabs',
+    'browser_get_session_info', 'browser_list_sessions', 'browser_list_shortcuts', 'browser_wait_for'
+]);
+const LOCAL_TOOLS = new Set([
+    'browser_get_tool_documentation', 'browser_list_devices', 'browser_list_tabs',
+    'browser_get_session_info', 'browser_list_sessions', 'browser_list_shortcuts'
+]);
 for (const tool of TOOLS) {
     const copy = AI_TOOL_COPY[tool.name];
     if (!copy) throw new Error(`Missing English AI copy for ${tool.name}`);
@@ -972,6 +1246,12 @@ for (const tool of TOOLS) {
             if (properties.fields.items.properties[name]) properties.fields.items.properties[name].description = description;
         }
     }
+    tool.annotations = {
+        readOnlyHint: READ_ONLY_TOOLS.has(tool.name),
+        destructiveHint: !READ_ONLY_TOOLS.has(tool.name),
+        idempotentHint: false,
+        openWorldHint: !LOCAL_TOOLS.has(tool.name)
+    };
 }
 
 // Comprehensive Tool Documentation & Agent Playbooks Dictionary
@@ -981,402 +1261,6 @@ for (const tool of TOOLS) {
         description: 'Stable idempotency key chosen before a side-effecting call. Repeating the same tool, target, and arguments with the same key within five minutes does not start a second action. This memory is lost when the relay restarts; after an uncertain outcome, inspect page state before retrying.'
     };
 }
-const TOOL_DOCUMENTATION = {
-    overview: {
-        title: "Android Tarayıcı MCP Köprüsü - AI Ajanı Kullanım Rehberi (Agent Playbook & Skills)",
-        description: "Bu sistem, gerçek bir Android cihazı üzerindeki donanım hızlandırmalı WebView ile çalışan yüksek performanslı Model Context Protocol (MCP) köprüsüdür. Yapay zeka ajanları gerçek tarayıcı ortamında arama yapabilir, sayfaları okuyabilir, form doldurabilir, butonlara tıklayabilir, sekme ve izole oturum yönetimi gerçekleştirebilir.",
-        operation_safety: "Yan etkili çağrıdan önce sabit operationId seçin; aynı anahtar, araç, hedef ve parametrelerle 5 dakika içinde tekrar çağrı ikinci işlem başlatmaz. Bu kayıt bellektedir ve röle yeniden başlayınca kaybolur. command_outcome_unknown durumunda önce sayfayı kontrol edin; gerçekleşmiş bir etki iptalle geri alınamaz.",
-        capabilities: [
-            "Gerçek Android WebView ortamında tam JavaScript, DOM, CSS ve Canvas çalıştırma",
-            "Multi-Profile Cookie İzolasyonu: Her AI istemcisine özel bağımsız çerez ve depolama alanı",
-            "Cihaz üstü Markdown motoru ile anında temiz içerik çıkarma — sayfa hiçbir dış servise gönderilmez",
-            "Vimium-Style Numaralandırılmış Görsel Overlay ile elementleri ID sayılarıyla seçme/tıklama",
-            "Çoklu Sekme (Multi-Tab) yönetimi ve DOM kaynağı alma"
-        ],
-        security_note: "Her istemci cihaz tarafından üretilen kalıcı bir kimliğe ve kendi izole çerez profiline sabitlenmiştir. Profil veya oturum değiştirilemez. 'execute_js' ve 'clear_data' yetkileri varsayılan olarak kapalıdır; kullanıcı telefondan açmadıkça bu çağrılar reddedilir. Sahip olduğunuz izinleri 'browser_get_session_info' ile görebilirsiniz.",
-        approval_note: "Bazı işlemler izniniz olsa bile cihaz sahibine sorulur: 'browser_execute_js', 'browser_clear_session_data' ve kişisel bilgi alanlarına (e-posta, telefon, adres, kimlik) yazma. Kullanıcı 30 saniye içinde yanıtlamazsa istek reddedilir — bu normaldir, aynı komutu döngüye sokmayın; kullanıcıya ne yapmak istediğinizi açıklayıp tekrar deneyin. Şifre, doğrulama kodu ve ödeme alanları ayrı bir izne ('sensitive_fields') bağlıdır: izin kapalıyken doldurulamaz, açıkken de varsayılan olarak her doldurma için ayrı onay istenir.",
-        concurrency_note: "Aynı anda en fazla 3 komutunuz çalışabilir; dördüncü komut 'too_many_requests' hatasıyla reddedilir. Bu bir ceza değil, telefonun pilini ve belleğini koruyan bir sınır: yanıtları bekleyip devam edin. Onay bekleyen bir komut da yanıtlanana (veya 30 saniyede reddedilene) kadar sıradaki yerini korur.",
-        takeover_note: "Kullanıcı bir sekmeyi 'devralabilir'. Devralınan sekmede okuma dahil hiçbir komut çalışmaz ve hata mesajı bunu açıkça söyler. Bu durumda 'browser_new_tab' ile başka bir sekmede çalışmaya devam edin. Hangi sekmelerin kullanıcıda olduğunu 'browser_get_session_info' yanıtındaki 'heldByUser' alanından görebilirsiniz.",
-        meta_tool_note: "İstediğiniz zaman 'browser_get_tool_documentation' aracını çağırarak spesifik bir araç veya kategori hakkında detaylı kılavuz alabilirsiniz."
-    },
-    categories: {
-        navigation: {
-            name: "Sayfa Gezinme & Arama",
-            tools: ["browser_navigate", "browser_reload", "browser_search", "browser_scroll", "browser_list_shortcuts", "browser_open_shortcut"]
-        },
-        interaction: {
-            name: "Etkileşim, Tıklama & Form Doldurma",
-            tools: ["browser_click", "browser_click_at", "browser_type", "browser_select_option", "browser_pick_date", "browser_read_form", "browser_fill_form", "browser_press_key", "browser_wait_for", "browser_handle_dialog", "browser_toggle_overlay", "browser_execute_js"]
-        },
-        content_extraction: {
-            name: "İçerik Okuma",
-            tools: ["browser_get_markdown", "browser_get_html", "browser_screenshot"]
-        },
-        tabs_and_sessions: {
-            name: "Sekme & Oturum Bilgisi",
-            tools: ["browser_new_tab", "browser_close_tab", "browser_list_tabs", "browser_switch_tab", "browser_get_session_info", "browser_clear_session_data"]
-        },
-        meta: {
-            name: "Rehber & Dokümantasyon",
-            tools: ["browser_get_tool_documentation", "browser_list_devices"]
-        }
-    },
-    tools: {
-        browser_get_tool_documentation: {
-            name: "browser_get_tool_documentation",
-            category: "meta",
-            summary: "Tüm MCP araçlarının parametrelerini, kullanım şekillerini, örneklerini ve en iyi iş akışlarını döner.",
-            parameters: {
-                tool_name: "(Opsiyonel, String) Hakkında bilgi istenen aracın adı (örn. 'browser_click', 'browser_get_markdown', 'browser_type', 'all'). Boş bırakılırsa tüm araçların rehberi döner.",
-                category: "(Opsiyonel, String) Kategori filtresi ('navigation', 'interaction', 'content_extraction', 'tabs_and_sessions', 'meta', 'all')."
-            },
-            best_practice: "Yeni bir göreve başlarken hangi araçları nasıl kombine edeceğinizi planlamak veya parametre isimlerini doğrulamak için ilk olarak bu aracı çağırın."
-        },
-        browser_list_devices: {
-            name: "browser_list_devices",
-            category: "meta",
-            summary: "Bu AI bağlantısına bağlı Android cihazlarını ve çevrimiçi durumlarını listeler.",
-            parameters: {},
-            example_call: {},
-            best_practice: "Birden fazla cihaz bağlıysa önce bu aracı çağırın, sonra tarayıcı aracına dönen deviceId değerini verin. Varsayılan cihaz çevrimiçiyse deviceId vermeden çağrı yapmak mevcut davranışı korur."
-        },
-        browser_navigate: {
-            name: "browser_navigate",
-            category: "navigation",
-            summary: "Belirtilen web adresine (URL) gider ve sayfanın yüklenmesini başlatır.",
-            parameters: {
-                url: "(Zorunlu, String) Gidilecek tam web adresi (örn. 'https://en.wikipedia.org' veya 'https://news.ycombinator.com'). Her zaman protokolü (https://) ekleyin.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            example_call: { url: "https://www.google.com" },
-            best_practice: "Yanıt zaten sayfanın özetini taşır: gerçek adres, başlık, 'headings' listesi ve uzunluk. Önce ona bakın — aradığınız bölüm listede yoksa sayfayı hiç okumadan başka bir adrese geçebilirsiniz. Okumaya karar verirseniz 'browser_get_markdown' çağırın; içeriği kesin istiyorsanız baştan read=true verin ve bir turdan tasarruf edin."
-        },
-        browser_reload: {
-            name: "browser_reload",
-            category: "navigation",
-            summary: "Aktif sekmedeki mevcut belgeyi tarayıcının gerçek yenileme işlemiyle yeniden yükler.",
-            parameters: {
-                read: "(Opsiyonel, Boolean) true ise yenilenen sayfanın Markdown içeriğini aynı yanıta ekler.",
-                offset: "(Opsiyonel, Integer) read=true iken Markdown parçasının başlangıç karakteri.",
-                tabId: "(Opsiyonel, String) Yenilenecek sekmenin ID'si.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            example_call: { read: true },
-            best_practice: "Bayat içerik, geçici ağ hatası veya kullanıcının yaptığı bir değişiklikten sonra aynı belgeyi yeniden istemek için kullanın. Yeni bir adrese gitmek için browser_navigate kullanın. CAPTCHA ve başarısız işlemlerde tekrar tekrar yenilemeyin."
-        },
-        browser_search: {
-            name: "browser_search",
-            category: "navigation",
-            summary: "Google'da belirtilen anahtar kelimelerle doğrudan arama yapar.",
-            parameters: {
-                query: "(Zorunlu, String) Aranacak kelime veya cümle (örn. '2026 en iyi yapay zeka modelleri')",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            example_call: { query: "İstanbul hava durumu" },
-            best_practice: "Arama yanıtındaki 'headings' listesi çoğu zaman sonuç başlıklarını verir; tam listeyi ve linkleri okumak için 'browser_get_markdown' çağırın veya read=true kullanın."
-        },
-        browser_get_markdown: {
-            name: "browser_get_markdown",
-            category: "content_extraction",
-            summary: "Açık olan sayfanın Markdown içeriğini döner. Dönüşüm cihazda yapılır; çıktı tıklanabilir öğelerin numaralandırıldığı bir etkileşim haritasıdır.",
-            parameters: {
-                offset: "(Opsiyonel, Integer) Token tasarrufu açıkken ilk çağrıda 0; devam çağrısında önceki next_offset değeri.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "İçerik okumanın tek ve varsayılan yoludur: hızlı, cihazda çalışır, sayfayı hiçbir dış servise göndermez. Çıktının başındaki element ID sayılarını doğrudan 'browser_click' ve 'browser_type' ile kullanın. has_more true ise aynı aracı next_offset ile çağırın; sayfayı baştan okumayın. Ham kaynak gerekiyorsa 'browser_get_html' ayrı bir araçtır."
-        },
-        browser_get_html: {
-            name: "browser_get_html",
-            category: "content_extraction",
-            summary: "Sayfanın ham outerHTML kaynağını mesaj sınırına uygun bölümler halinde döner.",
-            parameters: {
-                offset: "(Opsiyonel, Integer) İlk çağrıda 0; devam için önceki next_offset değeri.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "Spesifik DOM elementlerini, form input id/name etiketlerini veya karmaşık CSS seçicilerini bulmak gerektiğinde kullanın. has_more true ise next_offset ile devam edin."
-        },
-        browser_screenshot: {
-            name: "browser_screenshot",
-            category: "content_extraction",
-            summary: "Sekmenin JPEG görüntüsünü MCP görüntü bloğu olarak döner. Uygulama telefonda açıkken arka plandaki sekmeler için de çalışır: cihaz sekmeyi bir anlığına ekrana alıp geri döner.",
-            parameters: {
-                fullPage: "(Opsiyonel, Boolean) Varsayılan false. true ise sayfanın tamamı yakalanır.",
-                grid: "(Opsiyonel, Boolean) true ise görünür alanı etiketli hücrelere böler ve browser_click_at için screenshot_id üretir.",
-                grid_columns: "(Opsiyonel, Integer) 4–26; varsayılan 15.",
-                grid_rows: "(Opsiyonel, Integer) 4–40; varsayılan 24.",
-                tabId: "(Opsiyonel, String) Hedef sekme; verilmezse oturumun aktif sekmesi.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "Sayfanın yapısını anlamak için önce browser_get_markdown kullanın. Seçiciyle bulunamayan canvas, harita veya iframe kontrolü için grid=true ile görünür alanı alın ve dönen screenshot_id'yi hemen browser_click_at ile kullanın. Hücrenin merkezi küçük hedefi kaçırıyorsa x_ratio/y_ratio verin ya da görüntüdeki kesin x/y pikselini kullanın. Grid ile fullPage birlikte kullanılmaz.",
-            limitations: "Uygulama ön planda değilken hiçbir sekme çizilmez ve 'blank_capture' döner; bu durumda içeriği metin olarak okuyun. Ekrana alma birkaç yüz milisaniye sürer ve kullanıcının ekranı o an kısaca değişir, bu yüzden döngü içinde çağırmayın. Aynı anda yalnızca bir ekrana alma yapılabilir. Tam sayfa yakalama yalnızca ekran dışı çizimde mümkündür; ekrana alınarak çekilen görüntülerde yalnızca görünen alan gelir. Görüntü 720 piksel genişliğe ölçeklenir ve JPEG olarak sıkıştırılır. Video, WebGL ve GPU ile birleştirilen bazı canvas içerikleri boş çıkabilir."
-        },
-        browser_select_option: {
-            name: "browser_select_option",
-            category: "interaction",
-            summary: "Açılır listede (<select>) seçenek seçer — tıklamayla yapılamayan tek işlem.",
-            parameters: {
-                selector: "(Zorunlu, String) Listenin element ID sayısı veya CSS seçici.",
-                label: "(String) Seçeneğin görünen metni. Büyük/küçük harf ve Türkçe karakter farkı önemsizdir.",
-                value: "(Opsiyonel, String) option değeri.",
-                index: "(Opsiyonel, Integer) Seçeneğin sırası, 0'dan başlar."
-            },
-            example_call: { selector: "12", label: "Türkiye" },
-            best_practice: "Bir <select>'e asla 'browser_click' göndermeyin: Android'in kendi seçicisi açılır, o pencere sayfanın parçası değildir ve seçim yapılamaz — tıklama başarılı görünürken değer değişmez. Seçenekleri markdown çıktısında liste satırında ya da 'browser_read_form' yanıtında görebilirsiniz. Özel (role=listbox) menülerde önce menüyü 'browser_click' ile açın."
-        },
-        browser_pick_date: {
-            name: "browser_pick_date",
-            category: "interaction",
-            summary: "Takvimden ya da tarih alanından bir tarih seçer; gerekirse doğru aya kendisi ilerler.",
-            parameters: {
-                date: "(Zorunlu, String) YYYY-AA-GG biçiminde tarih, ör. '2026-09-15'.",
-                selector: "(Opsiyonel, String) Tarih alanının ya da takvimi açan öğenin element ID sayısı."
-            },
-            example_call: { date: "2026-09-15", selector: "34" },
-            best_practice: "Rezervasyon sitelerinde takvim hücreleri ekranda yalnızca gün sayısını gösterir; hangi ay olduğunu tahmin etmeyin, bu aracı kullanın. Takvim kapalıysa 'selector' verin. Gidiş-dönüş gibi aralık seçen takvimlerde aracı iki kez çağırın: ilk çağrı aralığın başını, ikincisi sonunu seçer. Yanıt 'seçilemez' ya da 'aralık dışında' diyorsa tarih gerçekten yoktur — tekrar denemek yerine kullanıcıya durumu söyleyin."
-        },
-        browser_read_form: {
-            name: "browser_read_form",
-            category: "content_extraction",
-            summary: "Yalnızca formu okur: alanlar, değerler, zorunlular, seçenekler ve hatalar.",
-            parameters: {
-                selector: "(Opsiyonel, String) Formun ya da içindeki bir alanın element ID sayısı / CSS seçicisi."
-            },
-            example_call: {},
-            best_practice: "Form doldururken her adımdan sonra bunu çağırın, 'browser_get_markdown' değil: tüm sayfayı yeniden okumak bir rezervasyon sayfasında on binlerce token tutar ve pahalı olduğu için atlanır — atlanınca da form körlemesine doldurulur. 'missing_required' hangi alanların kaldığını, 'invalid_fields' sayfanın neye itiraz ettiğini söyler."
-        },
-        browser_fill_form: {
-            name: "browser_fill_form",
-            category: "interaction",
-            summary: "Birden çok alanı tek komutta, tek onayla doldurur.",
-            parameters: {
-                fields: "(Zorunlu, Array) [{selector, value}] listesi, en fazla 30 öğe. Alan tipi otomatik anlaşılır."
-            },
-            example_call: { fields: [{ selector: "5", value: "Ayşe" }, { selector: "6", value: "ayse@example.com" }, { selector: "9", value: "Türkiye" }] },
-            best_practice: "Kayıt ve rezervasyon formlarında varsayılan yol budur: tek tur, tek onay. Alan alan doldurmak hem yavaştır hem de kişisel bilgi alanlarında arka arkaya onay kutusu çıkarır. Şehir/havalimanı gibi öneri listesi açan alanlar istisnadır — onları 'browser_type' ile yazıp listeden seçin. Doldurduktan sonra göndermeden önce 'browser_read_form' ile doğrulayın."
-        },
-        browser_handle_dialog: {
-            name: "browser_handle_dialog",
-            category: "interaction",
-            summary: "Bir sonraki alert/confirm/prompt kutusunun yanıtını önceden ayarlar.",
-            parameters: {
-                accept: "(Opsiyonel, Boolean) true = kabul, false = reddet. Varsayılan true.",
-                text: "(Opsiyonel, String) 'prompt' kutusuna yazılacak metin."
-            },
-            example_call: { accept: true },
-            best_practice: "Kutu açıkken sayfanın JavaScript'i durur, dolayısıyla o anda hiçbir komut çalışmaz — bu yüzden karar önceden verilir. Varsayılan: 'alert' kabul, 'confirm'/'prompt' ret. Bir yanıtta 'dialog' alanı gördüyseniz ve sonucu değiştirmek istiyorsanız bu aracı çağırıp aynı işlemi tekrarlayın."
-        },
-        browser_toggle_overlay: {
-            name: "browser_toggle_overlay",
-            category: "interaction",
-            summary: "Ekrandaki tüm interaktif elementlerin üzerine Vimium-style görsel numaralandırma etiketleri ekler/kaldırır.",
-            parameters: {
-                enabled: "(Zorunlu, Boolean) true (etiketleri aç) veya false (kapat)"
-            },
-            best_practice: "Form doldururken veya karmaşık bir sayfada tıklama yaparken önce overlay'i açın, ardından 'browser_get_markdown' çıktısındaki element ID sayılarını tespit edip doğrudan ID numarasıyla ('1', '2' vb.) tıklayın."
-        },
-        browser_click: {
-            name: "browser_click",
-            category: "interaction",
-            summary: "Bir öğeye gerçek işaretçi dizisiyle tıklar ve etkisini bildirir.",
-            parameters: {
-                selector: "(Zorunlu, String) Element ID sayısı veya CSS seçici.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "Yanıttaki 'page_changed' alanına bakın. False ise öğe bulunmuş ama bir şey olmamıştır — aynı tıklamayı tekrarlamak yardımcı olmaz; sayfayı yeniden okuyup başka bir öğe deneyin. 'suggestions' geldiyse bir liste açılmıştır, listeden seçin. 'new_url' geldiyse element numaraları geçersizdir, devam etmeden önce sayfayı yeniden okuyun."
-        },
-        browser_click_at: {
-            name: "browser_click_at",
-            category: "interaction",
-            summary: "Gridli ekran görüntüsündeki hücreye veya piksele gerçek Android dokunuşu gönderir.",
-            parameters: {
-                screenshot_id: "(Zorunlu, String) grid=true ekran görüntüsünün 30 saniyelik, tek kullanımlık kimliği.",
-                cell: "(String) A1..O24 gibi hücre etiketi; kullanılan grid yoğunluğuna göre son etiket değişir.",
-                x_ratio: "(Opsiyonel, Number) Hücre içinde soldan 0–1; varsayılan 0.5.",
-                y_ratio: "(Opsiyonel, Number) Hücre içinde yukarıdan 0–1; varsayılan 0.5.",
-                x: "(Number) JPEG üzerindeki kesin x pikseli; cell ile birlikte verilmez.",
-                y: "(Number) JPEG üzerindeki kesin y pikseli; cell ile birlikte verilmez."
-            },
-            example_call: { screenshot_id: "shot_abc123", cell: "H12", x_ratio: 0.7, y_ratio: 0.35 },
-            best_practice: "Önce DOM numarasıyla browser_click kullanın. Bu araç görsel yedektir. Ekran görüntüsünü aldıktan hemen sonra çağırın; sayfa kaydıysa veya değiştiyse yeni görüntü alın. Aynı screenshot_id ikinci kez kullanılamaz. Yanıttaki label/tag ve page_changed alanları gerçek hedefi ve etkiyi doğrular."
-        },
-        browser_press_key: {
-            name: "browser_press_key",
-            category: "interaction",
-            summary: "Enter, Escape, Tab veya ok tuşlarını gönderir.",
-            parameters: {
-                key: "(Zorunlu, String) Enter, Escape, Tab, ArrowDown, ArrowUp, Backspace …",
-                selector: "(Opsiyonel, String) Hedef öğe; boşsa odaktaki öğeye gider.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "Otomatik tamamlama akışının ikinci yarısı budur: 'browser_type' ile yazın, yanıtta 'suggestions' gelirse ArrowDown ve Enter gönderin. Arama kutusunda Enter formu da gönderir; 'form_submitted' alanı bunu doğrular."
-        },
-        browser_wait_for: {
-            name: "browser_wait_for",
-            category: "interaction",
-            summary: "Bir öğe veya metin görünene kadar bekler.",
-            parameters: {
-                selector: "(Opsiyonel, String) Beklenecek seçici veya element numarası.",
-                text: "(Opsiyonel, String) Beklenecek metin.",
-                timeout_ms: "(Opsiyonel, Integer) 500–20000 arası, varsayılan 8000.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "Arama sonuçları, uçuş listeleri ve giriş sonrası yönlendirmeler için kullanın. 'timeout' dönerse beklediğiniz şey gelmemiştir; tekrar beklemek yerine sayfayı okuyup gerçekte ne olduğunu görün."
-        },
-        browser_type: {
-            name: "browser_type",
-            category: "interaction",
-            summary: "Bir alana klavye gibi yazar; arama alanlarında karakter karakter gider.",
-            parameters: {
-                selector: "(Zorunlu, String) Element ID sayısı veya CSS seçici.",
-                text: "(Zorunlu, String) Yazılacak metin.",
-                keystroke: "(Opsiyonel, Boolean) Karakter karakter yazmayı zorlar.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "Uçuş, otel ve şehir alanlarında metnin görünmesi yetmez — form geçerli bir seçim bekler. Yazdıktan sonra yanıttaki 'suggestions' listesine bakın ve mutlaka birini seçin; liste boşsa 'keystroke' true ile tekrar deneyin, sonra 'browser_wait_for' ile listenin gelmesini bekleyin."
-        },
-        browser_execute_js: {
-            name: "browser_execute_js",
-            category: "interaction",
-            summary: "Sayfa bağlamında özel JavaScript kodu çalıştırır ve sonucunu döner.",
-            parameters: {
-                script: "(Zorunlu, String) Çalıştırılacak JS kodu (örn. 'document.title' veya 'window.location.href')"
-            },
-            best_practice: "Özel DOM sorguları, çerez okuma, sayfa içi hesaplamalar veya karmaşık tetikleyiciler için kullanın. Bu araç varsayılan olarak her çağrıda telefonda kullanıcı onayı ister (30 saniyede yanıt yoksa reddedilir), bu yüzden onu bir döngü içinde değil, tek ve amaçlı çağrılarla kullanın."
-        },
-        browser_new_tab: {
-            name: "browser_new_tab",
-            category: "tabs_and_sessions",
-            summary: "Oturumunuzda yeni bir sekme açar. Oturumun ilk sekmesinde yanıt, yönetimin isteğe bağlı site önerilerini de taşır.",
-            parameters: {
-                url: "(Opsiyonel, String) Açılışta gidilecek adres.",
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "Yanıttaki siteler yönetimin AI görevleri için seçtiği isteğe bağlı önerilerdir. AI bunlarla sınırlı değildir. Birini seçerseniz adresi yeniden yazmak yerine shortcutId ile browser_open_shortcut kullanın."
-        },
-        browser_close_tab: {
-            name: "browser_close_tab",
-            category: "tabs_and_sessions",
-            summary: "Belirtilen veya aktif olan sekmeyi kapatır.",
-            parameters: {
-                tabId: "(Opsiyonel, String) Kapatılacak sekme ID'si."
-            }
-        },
-        browser_list_tabs: {
-            name: "browser_list_tabs",
-            category: "tabs_and_sessions",
-            summary: "Bu AI oturumuna ait açık tüm sekmeleri başlıkları ve URL'leri ile listeler.",
-            parameters: {}
-        },
-        browser_switch_tab: {
-            name: "browser_switch_tab",
-            category: "tabs_and_sessions",
-            summary: "Belirtilen sekmeye geçiş yapar ve aktif sekme haline getirir.",
-            parameters: {
-                tabId: "(Zorunlu, String) Hedef sekme ID'si."
-            }
-        },
-        browser_list_shortcuts: {
-            name: "browser_list_shortcuts",
-            category: "navigation",
-            summary: "Hizmet yönetiminin AI görevleri için seçtiği isteğe bağlı site önerilerini döner.",
-            parameters: {
-                deviceId: "(Opsiyonel, String) Hedef Android cihaz ID'si."
-            },
-            best_practice: "Göreve uygun bir öneri varsa kullanabilirsiniz; zorunlu değildir. Seçtiğiniz kaydın URL'sini kopyalamak yerine shortcutId ile browser_open_shortcut kullanın; bu affiliate parametrelerini aynen korur."
-        },
-        browser_open_shortcut: {
-            name: "browser_open_shortcut",
-            category: "navigation",
-            summary: "AI'nin seçtiği yönetim önerisini, kayıtlı adresini yeniden yazmadan açar.",
-            parameters: {
-                shortcutId: "(Zorunlu, String) browser_list_shortcuts sonucundaki kısayol kimliği.",
-                read: "(Opsiyonel, Boolean) true ise sayfa Markdown içeriğini aynı yanıta ekler.",
-                offset: "(Opsiyonel, Integer) read=true iken Markdown başlangıç karakteri.",
-                tabId: "(Opsiyonel, String) Hedef sekme ID'si."
-            },
-            best_practice: "Bu araç bir siteyi kendiliğinden seçmez. Önce browser_list_shortcuts sonucundan uygun kaydı siz seçin. URL'yi browser_navigate içine kopyalamayın; affiliate bağlantısının aynen açılması için shortcutId kullanın."
-        },
-        browser_get_session_info: {
-            name: "browser_get_session_info",
-            category: "tabs_and_sessions",
-            summary: "Kendi oturumunuzun kimliğini, adını, açık sekme sayısını, cihazın size verdiği izinleri, ekran modunu ('viewMode') ve kullanıcının devraldığı sekmeleri ('heldByUser') döner.",
-            parameters: {},
-            best_practice: "Bir işe başlamadan önce hangi izinlere sahip olduğunuzu buradan doğrulayın; kapalı bir yetkiyi çağırmak yerine kullanıcıdan telefondan açmasını isteyin. Bir sekme yanıt vermiyorsa 'heldByUser' listesine bakın: kullanıcı o sekmeyi devralmış olabilir."
-        },
-        browser_list_sessions: {
-            name: "browser_list_sessions",
-            category: "tabs_and_sessions",
-            summary: "Yalnızca kendi oturumunuzu döner. Oturumlar arası görünürlük diye bir seçenek yoktur.",
-            parameters: {},
-            best_practice: "Aynı oturumu paylaşmanız gerekiyorsa cihaz sahibi aynı istemci anahtarını birden fazla MCP istemcisine tanımlar; oturum değiştirme diye bir işlem yoktur."
-        },
-        browser_clear_session_data: {
-            name: "browser_clear_session_data",
-            category: "tabs_and_sessions",
-            summary: "Kendi profilinizin çerezlerini, önbelleğini ve gezinti geçmişini temizler.",
-            parameters: {
-                clearCookies: "(Opsiyonel, Boolean) Varsayılan: true",
-                clearCache: "(Opsiyonel, Boolean) Varsayılan: true",
-                clearHistory: "(Opsiyonel, Boolean) Varsayılan: true"
-            },
-            best_practice: "'clear_data' izni varsayılan olarak kapalıdır ve izin açık olsa bile her çağrıda telefonda kullanıcı onayı istenir; 30 saniyede yanıt gelmezse reddedilir. Yalnızca kendi profilinize uygulanır; başka bir oturumun verisi silinemez."
-        }
-    },
-    playbooks: [
-        {
-            title: "Form ve rezervasyon sitelerinde çalışma",
-            steps: [
-                "1. Sayfaya gidin; yanıttaki 'headings' ile doğru yerde olduğunuzu doğrulayın. Yanıtlarda 'consent_wall' görürseniz forma girişmeden önce onu kapatın — bant hem ekranı hem tıklamaları örter. Kullanıcı aksini söylemediyse 'reject_id' ile en az veri paylaşan seçeneği kullanın; 'accept_id' yalnızca reddetme düğmesi bulunamadığında kalır.",
-                "2. 'browser_get_markdown' çağırın — element numaraları bu geçişte atanır, öncesinde numarayla tıklayamazsınız. Bağlantılardaki fiil hangi aracı kullanacağınızı söyler: type: / select: / pick_date: / click:.",
-                "3. Formun tam durumunu 'browser_read_form' ile alın: zorunlu alanlar, açılır liste seçenekleri ve devre dışı alanlar buradadır. Bundan sonra her adımda tüm sayfayı değil bunu okuyun.",
-                "4. Sıradan alanları tek seferde doldurun: 'browser_fill_form' (tek tur, tek onay).",
-                "5. Açılır listeler için 'browser_select_option'. Bir <select>'e asla tıklamayın — Android'in kendi seçicisi açılır ve ajan oradan seçim yapamaz.",
-                "6. Tarihler için 'browser_pick_date' (YYYY-AA-GG). Takvim hücreleri ekranda sadece gün sayısı gösterir; ay tahmin etmeyin.",
-                "7. Şehir/havalimanı gibi öneri listesi açan alanlar istisnadır: 'browser_type' ile karakter karakter yazılır, sonra yanıttaki 'suggestions' listesinden numarayla 'browser_click' ya da 'browser_press_key' ile ArrowDown + Enter.",
-                "8. Göndermeden önce 'browser_read_form' ile doğrulayın: 'missing_required' boşsa form tamamdır.",
-                "9. Gönderdikten sonra yanıttaki 'invalid_fields' ve 'alerts' alanlarına bakın — sayfa formu neden kabul etmediğini (hatalı giriş, geçersiz alan) orada söyler. Yanıt sayfanın yeni içerik yüklediğini söylüyorsa gönderim gitmiştir: düğmeye tekrar basmayın, 'browser_wait_for' ile bekleyip sonucu okuyun. 'page_changed' false ve bu alanlar da boşsa gerçekten ilerlememişsinizdir; aynı adımı tekrarlamak yardımcı olmaz.",
-                "10. Sonuçların yüklenmesini 'browser_wait_for' ile bekleyin. Bir onay kutusu ('dialog') çıktıysa 'browser_handle_dialog' ile yanıtı ayarlayıp adımı tekrarlayın.",
-                "11. Yanıtta 'captcha' alanı görürseniz sayfa insan doğrulaması istiyor demektir. Cihaz sayfayı sizin için bir kez yeniler; doğrulama yine duruyorsa çözmeye çalışmayın — denemeler engeli sertleştirir ve o sayfadan okuduğunuz içerik eksik olur. Kullanıcıya durumu söyleyip telefondan doğrulamayı kendisinin tamamlamasını isteyin, sonra adımı tekrarlayın."
-            ]
-        },
-        {
-            title: "İş Akışı 1: Web Araması ve Bilgi Toplama (Research & Extract)",
-            steps: [
-                "1. 'browser_search(query: \"...\")' çağırarak arama yapın.",
-                "2. 'browser_get_markdown()' çağırarak arama sonuçlarını ve linkleri okuyun.",
-                "3. İlgili bir sonuca gitmek için 'browser_navigate(url: \"...\")' veya 'browser_click(selector: \"text=...\")' çağırın.",
-                "4. Hedef sayfadaki tam içeriği 'browser_get_markdown()' ile çekip kullanıcıya özetleyin."
-            ]
-        },
-        {
-            title: "İş Akışı 2: Form Doldurma ve Buton Tıklama (Form Filling & Automation)",
-            steps: [
-                "1. 'browser_navigate(url: \"...\")' ile sayfayı açın.",
-                "2. 'browser_type(selector: \"input[name='username']\", text: \"...\")' ile inputları doldurun.",
-                "3. Butona tıklamak için 'browser_click(selector: \"text=Giriş Yap\")' veya CSS seçici kullanın.",
-                "4. İşlemin sonucunu doğrulamak için 'browser_get_markdown()' çağırın."
-            ]
-        },
-        {
-            title: "İş Akışı 3: Numaralandırılmış Element ile Hassas Tıklama",
-            steps: [
-                "1. 'browser_toggle_overlay(enabled: true)' ile interaktif elementlerin üzerine numaralandırma etiketlerini yerleştirin.",
-                "2. 'browser_get_markdown()' çağırarak çıktının başındaki 'İnteraktif Elementler Tablosu'ndan ID numaralarını okuyun.",
-                "3. Hedef elementin numarasını (örn. '5') 'browser_click(selector: \"5\")' ile doğrudan tıklayın.",
-                "4. İşi bitirince 'browser_toggle_overlay(enabled: false)' ile overlay'i kapatın."
-            ]
-        },
-        {
-            title: "İş Akışı 4: Paralel Görevler & Sekme İzolasyonu (Multi-Tab Management)",
-            steps: [
-                "1. Mevcut sayfayı bozmamak için 'browser_new_tab(url: \"https://...\")' çağırın.",
-                "2. Yeni sekmede işlemlerinizi yürütün.",
-                "3. İşiniz bittiğinde 'browser_close_tab()' ile kapatın veya 'browser_switch_tab(tabId: \"...\")' ile önceki sekmeye dönün."
-            ]
-        }
-    ]
-};
-
 function documentedParameters(tool) {
     const required = new Set(tool.inputSchema?.required || []);
     return Object.fromEntries(Object.entries(tool.inputSchema?.properties || {}).map(([name, schema]) => {
@@ -1389,6 +1273,9 @@ function documentedParameters(tool) {
         if (schema.minimum !== undefined) item.minimum = schema.minimum;
         if (schema.maximum !== undefined) item.maximum = schema.maximum;
         if (schema.pattern) item.pattern = schema.pattern;
+        for (const constraint of ['minLength', 'maxLength', 'minItems', 'maxItems', 'default']) {
+            if (schema[constraint] !== undefined) item[constraint] = schema[constraint];
+        }
         if (schema.items?.properties) {
             const itemRequired = new Set(schema.items.required || []);
             item.item_fields = Object.fromEntries(Object.entries(schema.items.properties).map(([childName, child]) => [childName, {
@@ -1532,6 +1419,8 @@ const ENGLISH_TOOL_DOCUMENTATION = {
             category,
             summary: copy.description,
             parameters: documentedParameters(tool),
+            parameter_rules: Object.fromEntries(['required', 'anyOf', 'oneOf'].filter(key => tool.inputSchema[key]).map(key => [key, tool.inputSchema[key]])),
+            annotations: tool.annotations,
             best_practice: copy.bestPractice,
             ...(ENGLISH_EXAMPLE_CALLS[tool.name] ? { example_call: ENGLISH_EXAMPLE_CALLS[tool.name] } : {})
         }];
@@ -1540,33 +1429,55 @@ const ENGLISH_TOOL_DOCUMENTATION = {
 };
 
 function generateDocumentationResponse(toolName = 'all', category = 'all') {
-    const cleanTool = (toolName || 'all').trim().toLowerCase();
-    const cleanCat = (category || 'all').trim().toLowerCase();
-
-    if (cleanTool !== 'all' && ENGLISH_TOOL_DOCUMENTATION.tools[cleanTool]) {
-        const doc = ENGLISH_TOOL_DOCUMENTATION.tools[cleanTool];
+    const availableTools = Object.keys(ENGLISH_TOOL_DOCUMENTATION.tools);
+    const availableCategories = ['all', ...Object.keys(ENGLISH_TOOL_CATEGORIES), 'membership'];
+    const fail = (code, message) => ({
+        status: 'error', error: code, message,
+        available_tools: availableTools, available_topics: ['all', 'membership'],
+        available_categories: availableCategories
+    });
+    if (typeof toolName !== 'string' || typeof category !== 'string' || toolName.length > 128 || category.length > 128) {
+        return fail('invalid_documentation_arguments', 'tool_name and category must be strings of at most 128 characters. Use tool_name: \'all\' or \'membership\', or a listed tool name.');
+    }
+    const cleanTool = toolName.trim().toLowerCase() || 'all';
+    const cleanCat = category.trim().toLowerCase() || 'all';
+    if (!availableCategories.includes(cleanCat)) {
+        return fail('unknown_documentation_category', 'Unknown category. Choose a value from available_categories.');
+    }
+    if (cleanTool !== 'all' && cleanTool !== 'membership' && !Object.hasOwn(ENGLISH_TOOL_DOCUMENTATION.tools, cleanTool)) {
+        return fail('unknown_documentation_tool', 'Unknown tool or topic. Choose a listed tool, or use tool_name: \'all\' or \'membership\'.');
+    }
+    if (cleanTool === 'membership' || (cleanTool === 'all' && cleanCat === 'membership')) {
         return {
-            status: "success",
-            requested_tool: cleanTool,
-            documentation: doc,
-            meta_info: "Call with tool_name: 'all' to receive the complete browser operating guide and playbooks.",
-            formatted_text: `### Tool guide: ${doc.name}\n- **Category:** ${doc.category}\n- **Summary:** ${doc.summary}\n- **Parameters:**\n${Object.entries(doc.parameters).map(([k, v]) => `  - \`${k}\` (${v.type}${v.required ? ', required' : ', optional'}): ${v.description}`).join('\n')}\n- **Best practice:** ${doc.best_practice}\n${doc.example_call ? `- **Example call:** \`${JSON.stringify(doc.example_call)}\`\n` : ''}`
+            status: 'success', requested_topic: 'membership',
+            documentation: membershipGuide(limits.PLANS, googlePlay.configured),
+            meta_info: "Use tool_name: 'all' for the browser guide. Membership information describes public plans, not account status."
         };
     }
-
-    let filteredTools = Object.values(ENGLISH_TOOL_DOCUMENTATION.tools);
-    if (cleanCat !== 'all') {
-        filteredTools = filteredTools.filter(t => t.category === cleanCat);
+    if (cleanTool !== 'all') {
+        const doc = ENGLISH_TOOL_DOCUMENTATION.tools[cleanTool];
+        const parameters = Object.entries(doc.parameters).map(([name, value]) => {
+            const constraints = Object.fromEntries(Object.entries(value).filter(([key]) => !['type', 'required', 'description', 'item_fields'].includes(key)));
+            const children = value.item_fields ? '\n    Item fields: ' + JSON.stringify(value.item_fields) : '';
+            return '  - ' + name + ' (' + value.type + (value.required ? ', required' : ', optional') + '): ' + value.description +
+                (Object.keys(constraints).length ? ' Constraints: ' + JSON.stringify(constraints) : '') + children;
+        }).join('\n');
+        return {
+            status: 'success', requested_tool: cleanTool, documentation: doc,
+            meta_info: "Call with tool_name: 'all' for the full guide, or 'membership' for Plus/Pro information.",
+            formatted_text: '### Tool guide: ' + doc.name + '\n- Category: ' + doc.category + '\n- Summary: ' + doc.summary +
+                '\n- Parameters:\n' + parameters + '\n- Parameter rules: ' + JSON.stringify(doc.parameter_rules) +
+                '\n- Best practice: ' + doc.best_practice +
+                (doc.example_call ? '\n- Example call: ' + JSON.stringify(doc.example_call) : '')
+        };
     }
-
+    const filteredTools = Object.values(ENGLISH_TOOL_DOCUMENTATION.tools).filter(tool => cleanCat === 'all' || tool.category === cleanCat);
     return {
-        status: "success",
-        overview: ENGLISH_TOOL_DOCUMENTATION.overview,
-        category_filter: cleanCat,
-        total_tools: filteredTools.length,
-        tools: filteredTools,
+        status: 'success', overview: ENGLISH_TOOL_DOCUMENTATION.overview,
+        category_filter: cleanCat, total_tools: filteredTools.length, tools: filteredTools,
         playbooks: ENGLISH_TOOL_DOCUMENTATION.playbooks,
-        quick_tip: "For focused help, call browser_get_tool_documentation with tool_name set to a specific tool."
+        ...(cleanCat === 'all' ? { membership: membershipGuide(limits.PLANS, googlePlay.configured) } : {}),
+        quick_tip: "For focused help, set tool_name to a specific tool or to 'membership' for Plus/Pro information."
     };
 }
 
@@ -2593,8 +2504,9 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
 
         // Direct handling for Documentation / Skill Guide Tool (Zero-latency server response)
         if (toolName === "browser_get_tool_documentation" || toolName === "get_tool_documentation" || toolName === "browser_get_skills" || toolName === "get_skills") {
-            const toolDocResponse = generateDocumentationResponse(cleanArgs.tool_name || cleanArgs.name, cleanArgs.category);
-            addLog(auth.clientId, ctx.clientName, 'köprü', `Dokümantasyon: ${toolName}`, 'success', String(cleanArgs.tool_name || 'all'));
+            const toolDocResponse = generateDocumentationResponse(cleanArgs.tool_name ?? cleanArgs.name, cleanArgs.category);
+            const isError = toolDocResponse.status === 'error';
+            addLog(auth.clientId, ctx.clientName, 'relay', `Documentation: ${toolName}`, isError ? 'error' : 'success', toolDocResponse.requested_tool || toolDocResponse.requested_topic || 'all');
 
             const content = [
                 {
@@ -2602,8 +2514,8 @@ async function dispatchJsonRpc(auth, ctx, rpcRequest, send) {
                     text: JSON.stringify(toolDocResponse, null, 2)
                 }
             ];
-            recordToolUsage(auth, toolName, 'success', Date.now() - toolStartedAt);
-            reply({ content });
+            recordToolUsage(auth, toolName, isError ? 'error' : 'success', Date.now() - toolStartedAt);
+            reply({ content, isError });
             return 'handled';
         }
 
@@ -3548,9 +3460,9 @@ app.post('/oauth/revoke', async (req, res) => {
 
 // REST Documentation / Skills Endpoint
 app.all(['/mcp/tools/browser_get_tool_documentation', '/tools/browser_get_tool_documentation', '/api/docs', '/api/skills'], (req, res) => {
-    const args = req.method === 'POST' ? req.body : req.query;
-    const toolDocResponse = generateDocumentationResponse(args.tool_name || args.name, args.category);
-    return res.json(toolDocResponse);
+    const args = (req.method === 'POST' ? req.body : req.query) || {};
+    const toolDocResponse = generateDocumentationResponse(args.tool_name ?? args.name, args.category);
+    return res.status(toolDocResponse.status === 'error' ? 400 : 200).json(toolDocResponse);
 });
 
 // ----------------------------------------------------

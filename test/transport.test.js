@@ -303,6 +303,78 @@ test('browser documentation is an English operating guide with forms, shortcuts 
     );
 });
 
+test('all focused guides match served schemas and expose English constraints and advisory safety hints', async () => {
+    const list = await rpc({ jsonrpc: '2.0', id: 340, method: 'tools/list' });
+    const tools = list.body.result.tools;
+    for (const tool of tools) {
+        const response = await rpc({
+            jsonrpc: '2.0', id: 341, method: 'tools/call',
+            params: { name: 'browser_get_tool_documentation', arguments: { tool_name: tool.name } }
+        });
+        assert.equal(response.body.result.isError, false);
+        const guide = JSON.parse(response.body.result.content[0].text);
+        assert.equal(guide.documentation.summary, tool.description);
+        assert.deepEqual(guide.documentation.annotations, tool.annotations);
+        assert.deepEqual(Object.keys(guide.documentation.parameters), Object.keys(tool.inputSchema.properties));
+        assert.doesNotMatch(JSON.stringify(guide), /[çğıöşüÇĞİÖŞÜ]/);
+        for (const parameter of Object.values(guide.documentation.parameters)) assert.ok(parameter.description);
+        if (tool.name === 'browser_fill_form') {
+            assert.equal(guide.documentation.parameters.fields.maxItems, 30);
+            assert.equal(guide.documentation.parameters.fields.minItems, 1);
+            assert.match(guide.formatted_text, /Item fields:.*selector.*value/);
+            assert.match(guide.formatted_text, /maxItems.*30/);
+        }
+        if (tool.name === 'browser_click_at') assert.equal(tool.inputSchema.oneOf.length, 2);
+        if (tool.name === 'browser_wait_for') assert.equal(tool.inputSchema.anyOf.length, 2);
+        if (tool.name === 'browser_select_option') assert.equal(tool.inputSchema.anyOf.length, 3);
+    }
+    assert.equal(tools.find(t => t.name === 'browser_clear_session_data').annotations.destructiveHint, true);
+    assert.equal(tools.find(t => t.name === 'browser_get_tool_documentation').annotations.openWorldHint, false);
+});
+
+test('documentation rejects unknown names, prototype keys and malformed values with recoverable English errors', async () => {
+    for (const args of [
+        { tool_name: 'browser_missing' }, { tool_name: 'constructor' }, { tool_name: '__proto__' },
+        { category: 'missing' }, { tool_name: [] }, { category: {} },
+        { tool_name: false }, { category: 0 }, { tool_name: 'x'.repeat(129) }
+    ]) {
+        const response = await rpc({
+            jsonrpc: '2.0', id: 342, method: 'tools/call',
+            params: { name: 'browser_get_tool_documentation', arguments: args }
+        });
+        assert.equal(response.status, 200);
+        assert.equal(response.body.result.isError, true);
+        const problem = JSON.parse(response.body.result.content[0].text);
+        assert.equal(problem.status, 'error');
+        assert.ok(problem.available_tools.includes('browser_fill_form'));
+        assert.ok(problem.available_topics.includes('membership'));
+        assert.doesNotMatch(JSON.stringify(problem), /[çğıöşüÇĞİÖŞÜ]/);
+        const rest = await fetch(`${BASE}/api/docs`, {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(args)
+        });
+        assert.equal(rest.status, 400);
+        assert.deepEqual(await rest.json(), problem);
+    }
+    const valid = await fetch(`${BASE}/api/docs?tool_name=browser_fill_form`);
+    assert.equal(valid.status, 200);
+});
+
+test('Plus and Pro are discoverable in the full guide and via both focused membership filters', async () => {
+    const full = await (await fetch(`${BASE}/api/docs`)).json();
+    assert.equal(full.membership.title, 'Tabrove Plus and Pro');
+    for (const args of [{ tool_name: 'membership' }, { category: 'membership' }]) {
+        const request = { jsonrpc: '2.0', id: 343, method: 'tools/call', params: { name: 'browser_get_tool_documentation', arguments: args } };
+        const response = await rpc(request);
+        const guide = JSON.parse(response.body.result.content[0].text);
+        assert.equal(response.body.result.isError, false);
+        assert.equal(guide.requested_topic, 'membership');
+        assert.deepEqual(guide.documentation, full.membership);
+        assert.equal(guide.documentation.plans.pro.purchasable, false);
+        assert.doesNotMatch(JSON.stringify(guide), /[çğıöşüÇĞİÖŞÜ]/);
+        assert.deepEqual((await rpcOverSse(request)).result, response.body.result);
+    }
+});
+
 test('bilinmeyen araç JSON-RPC hatası döner', async () => {
     const res = await rpc({
         jsonrpc: '2.0',

@@ -24,7 +24,7 @@ const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 /** Tool names as declared in the MCP schema list. */
 function declaredTools() {
     const names = new Set();
-    const pattern = /name:\s*"(browser_[a-z_]+)",\s*\n\s*description:/g;
+    const pattern = /name:\s*"(browser_[a-z_]+)"/g;
     let match;
     while ((match = pattern.exec(SOURCE)) !== null) names.add(match[1]);
     return names;
@@ -42,9 +42,10 @@ function dispatchedTools() {
 /** Tool names with an entry in the documentation the agent can request. */
 function documentedTools() {
     const names = new Set();
-    const pattern = /^\s{8}(browser_[a-z_]+):\s*\{$/gm;
+    const guideCopy = SOURCE.slice(SOURCE.indexOf('const AI_TOOL_COPY = {'), SOURCE.indexOf('// MCP annotations'));
+    const pattern = /^\s{4}(browser_[a-z_]+):\s*\{$/gm;
     let match;
-    while ((match = pattern.exec(SOURCE)) !== null) names.add(match[1]);
+    while ((match = pattern.exec(guideCopy)) !== null) names.add(match[1]);
     return names;
 }
 
