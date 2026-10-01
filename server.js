@@ -3712,6 +3712,11 @@ async function accountSnapshot(device) {
         // were separated.
         syncEnabled: device.syncEnabled === true,
         email: account.email,
+        proPreregistration: {
+            available: true,
+            registered: Number(account.proPreregisteredAt || 0) > 0,
+            registeredAt: Number(account.proPreregisteredAt || 0)
+        },
         features: { registration: ALLOW_REGISTRATION && limits.FEATURES.registration,
             guestEntry: limits.FEATURES.guestEntry,
             cloudBackupUploads: limits.FEATURES.cloudBackupUploads },
@@ -3985,6 +3990,27 @@ app.get('/api/v1/account', async (req, res) => {
     const device = requireDevice(req, res);
     if (!device) return;
     res.json(await accountSnapshot(device));
+});
+
+app.post('/api/v1/account/pro-preregistration', async (req, res) => {
+    const authenticated = requireDevice(req, res);
+    if (!authenticated) return;
+    // Use the phone's persisted account binding. Submitted account ids or emails grant nothing.
+    const device = await store.getDevice(authenticated.id);
+    if (!device?.accountId || device.guestId) return res.status(403).json({
+        error: 'account_required', message: 'Ön kayıt için hesabınıza giriş yapın. Misafir kullanıcılar ön kayıt olamaz.'
+    });
+    try {
+        const registered = await store.registerProInterest(device.accountId);
+        if (!registered) return res.status(403).json({
+            error: 'account_inactive', message: 'Ön kayıt için etkin bir hesap gerekir.'
+        });
+        res.json(await accountSnapshot(device));
+    } catch (error) {
+        console.error('[Pro preregistration] Save failed:', error.message);
+        res.status(503).json({ error: 'preregistration_unavailable',
+            message: 'Ön kayıt kaydedilemedi. Biraz sonra tekrar deneyin.' });
+    }
 });
 
 /** Select Free-active routes without deleting devices, local profiles or any
@@ -5246,11 +5272,12 @@ app.get('/', async (req, res) => {
     if (!ctx) return;
     const window = limits.currentUsageWindow();
 
-    const [totals, storedAccounts, catalogue, categories] = await Promise.all([
+    const [totals, storedAccounts, catalogue, categories, proPreregistrations] = await Promise.all([
         store.aggregates(window),
         store.listAccounts({ limit: 1000 }),
         store.listQuickLinks({ includeInactive: true }),
-        store.listQuickLinkCategories()
+        store.listQuickLinkCategories(),
+        store.countProPreregistrations()
     ]);
     const accountRows = await Promise.all(storedAccounts.map(effectiveAccount));
     const recentAccounts = accountRows.slice(0, 6);
@@ -5270,6 +5297,7 @@ app.get('/', async (req, res) => {
         recentAccounts,
         usageByAccount,
         openChannels: sseSessions.size,
+        proPreregistrations,
         quickLinks: {
             sites: catalogue.links.length,
             categories: categories.length,
@@ -5287,6 +5315,19 @@ app.get('/', async (req, res) => {
 function userPageRedirect(accountId, message, error = false) {
     return `/admin/users/${encodeURIComponent(accountId)}?${error ? 'err' : 'ok'}=${encodeURIComponent(message)}`;
 }
+
+app.get('/admin/pro-preregistrations', async (req, res) => {
+    const ctx = await requireOperator(req, res);
+    if (!ctx) return;
+    const total = await store.countProPreregistrations();
+    const pages = Math.max(1, Math.ceil(total / 100));
+    const requestedPage = Number(req.query.page);
+    const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? Math.min(requestedPage, pages) : 1;
+    const registrations = await store.listProPreregistrations({ limit: 100, offset: (page - 1) * 100 });
+    panelHeaders(res);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(panel.renderProPreregistrations({ account: ctx.account, total, registrations, page, pages }));
+});
 
 app.get('/admin/policy', async (req, res) => {
     const ctx = await requireOperator(req, res);

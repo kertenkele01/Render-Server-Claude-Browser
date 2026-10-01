@@ -34,6 +34,7 @@ yönlendirilmiyor.
 | `PUT /api/v1/devices/:id/permissions` | Ana cihazın imzaladığı yedek cihaz yetkilerini kaydeder |
 | `POST /api/v1/clients/:id/rotate` | Yetkili telefonun ürettiği token değişikliğini atomik kaydeder |
 | `POST /api/v1/account/password` | Parola değiştirir |
+| `POST /api/v1/account/pro-preregistration` | Giriş yapılmış hesabın e-postasıyla ücretsiz Pro ön kaydı oluşturur |
 | `GET /api/v1/audit` | Hesabın denetim kaydı |
 
 Bu uçlar hesap oturumuyla değil, telefonun zaten elinde olan
@@ -418,6 +419,19 @@ test var.
 
 Kayıtlar hesap başına süzülür ve plana göre 7–90 gün saklanır; panelden CSV
 olarak dışa aktarılabilir.
+
+## Pro ön kayıtları
+
+Android uygulamasındaki Pro sayfasından başvurulur. Misafirler başvuramaz;
+her aktif hesap yalnızca bir kez kaydedilir ve ilk kayıt tarihi korunur.
+Ön kayıt abonelik veya Pro yetkisi başlatmaz. Hesap kimliği ve e-posta, isteğin
+gövdesinden değil kimliği doğrulanan cihazın kayıtlı hesabından alınır.
+
+Operatör panelindeki **Pro Ön Kayıtları** (`/admin/pro-preregistrations`),
+toplam sayıyı, e-posta adreslerini ve başvuru tarihlerini sayfalı listede gösterir.
+Genel bakışta da kayıt sayısı bulunur. Kullanıcı API'si yalnızca kendi ön kayıt
+durumunu döndürür; e-posta listesi operatör oturumu gerektirir.
+Gerekli PostgreSQL alanı ve indeksi sunucu açılışında otomatik oluşturulur.
 
 ## Bilinen sınırlar
 

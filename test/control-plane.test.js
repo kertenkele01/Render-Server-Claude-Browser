@@ -245,6 +245,68 @@ test.after(() => {
 
 // --- the app is the whole user experience ----------------------------------
 
+test('Pro ön kayıt kimliği telefondan alır; misafiri reddeder ve e-postaları yalnızca yöneticiye gösterir', async () => {
+    const suffix = crypto.randomUUID();
+    const first = await connectDevice(`pro-first-${suffix}`, 'pro-first-device-secret');
+    const other = await connectDevice(`pro-other-${suffix}`, 'pro-other-device-secret');
+    const guest = await connectDevice(`pro-guest-${suffix}`, 'pro-guest-device-secret');
+    try {
+        const firstEmail = `pro-first-${suffix}@test.com`;
+        const otherEmail = `pro-other-${suffix}@test.com`;
+        const owner = await appSignUp(first, firstEmail, 'pro-register-password-1');
+        await appSignUp(other, otherEmail, 'pro-register-password-2');
+        assert.deepEqual(owner.proPreregistration, { available: true, registered: false, registeredAt: 0 });
+        const noCredential = await fetch(BASE + '/api/v1/account/pro-preregistration', { method: 'POST' });
+        assert.equal(noCredential.status, 401);
+        assert.equal((await appApi(guest, 'POST', '/api/v1/guest', {})).status, 200);
+        const guestResult = await appApi(guest, 'POST', '/api/v1/account/pro-preregistration', {
+            accountId: owner.accountId, email: firstEmail
+        });
+        assert.equal(guestResult.status, 403);
+        assert.equal(guestResult.body.error, 'account_required');
+
+        const registered = await appApi(first, 'POST', '/api/v1/account/pro-preregistration', {});
+        assert.equal(registered.status, 200);
+        assert.equal(registered.body.proPreregistration.registered, true);
+        assert.equal(registered.body.plan.id, 'free');
+        const again = await appApi(first, 'POST', '/api/v1/account/pro-preregistration', {});
+        assert.deepEqual(again.body.proPreregistration, registered.body.proPreregistration);
+        assert.equal(again.headers.get('cache-control'), 'no-store');
+        assert.equal((await appApi(other, 'GET', '/api/v1/account')).body.proPreregistration.registered, false);
+
+        const forged = await appApi(other, 'POST', '/api/v1/account/pro-preregistration', {
+            accountId: owner.accountId, email: 'injected@test.com'
+        });
+        assert.equal(forged.status, 200);
+        assert.equal(forged.body.email, otherEmail);
+        assert.notEqual(forged.body.accountId, owner.accountId);
+        assert.ok(!JSON.stringify(forged.body).includes(firstEmail));
+
+        const forbiddenPanel = await fetch(BASE + '/admin/pro-preregistrations', {
+            headers: { authorization: `Bearer ${first.credential}` }, redirect: 'manual'
+        });
+        assert.notEqual(forbiddenPanel.status, 200);
+        assert.ok(!(await forbiddenPanel.text()).includes(firstEmail));
+        const admin = await webSignIn(OPERATOR_EMAIL, 'operator-parolasi-uzun');
+        const list = await visit(admin, '/admin/pro-preregistrations?page=999999999');
+        assert.equal(list.status, 200);
+        const html = await list.text();
+        assert.ok(html.includes(firstEmail) && html.includes(otherEmail));
+        assert.ok(!html.includes('injected@test.com'));
+        assert.ok(html.includes('<div class="n">2</div>'));
+        assert.match(list.headers.get('cache-control'), /no-store/);
+        await form(admin, '/admin/accounts/status', { accountId: forged.body.accountId, status: 'suspended' });
+        assert.equal((await appApi(other, 'POST', '/api/v1/account/pro-preregistration', {})).status, 403);
+
+        await appApi(first, 'POST', '/api/v1/logout');
+        assert.equal((await appApi(first, 'POST', '/api/v1/account/pro-preregistration', {})).status, 403);
+        await appApi(first, 'POST', '/api/v1/login', { email: firstEmail, password: 'pro-register-password-1' });
+        assert.deepEqual((await appApi(first, 'GET', '/api/v1/account')).body.proPreregistration, registered.body.proPreregistration);
+    } finally {
+        first.close(); other.close(); guest.close();
+    }
+});
+
 test('uygulamadan kayıt cihazı kendiliğinden bağlar', async () => {
     const device = await connectDevice('dev_kayit', 'cihaz-sirri-16-karakter');
     assert.equal(device.ack.claimed, false);
