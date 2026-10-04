@@ -1084,17 +1084,17 @@ const AI_TOOL_COPY = {
         bestPractice: "Select an online device explicitly when multiple devices are bound; omitting deviceId uses the current default route."
     },
     browser_navigate: {
-        description: "Opens an absolute HTTP(S) URL and returns the final URL, title, headings, element counts, and loading state. Use read=true when you know you need the page's Markdown immediately. A still_loading result is a usable partial state, not a failure.",
+        description: "Opens an absolute HTTP(S) URL and returns the final URL and loading state. With the device's read permission, it also returns title, headings and element counts. read=true requires both navigate and read permissions and includes Markdown. A still_loading result is a usable partial state, not a failure.",
         params: { url: "Absolute HTTP or HTTPS URL to open.", read: "When true, include the page's Markdown interaction map in the same response.", offset: "Markdown character offset when read=true; use next_offset to continue a chunked response." },
         bestPractice: "Inspect the returned summary before fetching a large page. After navigation, obtain fresh element IDs before interacting."
     },
     browser_reload: {
-        description: "Performs a real reload of the current document and returns its refreshed summary. Use it for stale content or a transient load failure, not as a loop for CAPTCHA or an uncertain submission.",
+        description: "Performs a real reload of the current document. Its page summary requires the device's read permission; read=true requires both navigate and read. Use it for stale content or a transient load failure, not as a loop for CAPTCHA or an uncertain submission.",
         params: { read: "When true, include refreshed Markdown.", offset: "Markdown character offset when read=true.", tabId: "Optional tab to reload; defaults to the active tab." },
         bestPractice: "If an action may already have succeeded, inspect the page before reloading or repeating it."
     },
     browser_search: {
-        description: "Runs a Google search and returns the result page summary. Set read=true or call browser_get_markdown to inspect result links.",
+        description: "Runs a Google search. Its result-page summary requires the device's read permission; read=true requires both navigate and read. Set read=true or call browser_get_markdown to inspect result links.",
         params: { query: "Search query.", read: "When true, include result-page Markdown.", offset: "Markdown character offset when read=true." },
         bestPractice: "Prefer browser_list_shortcuts first when a recommended site directly matches the task; otherwise search normally."
     },
@@ -1104,7 +1104,7 @@ const AI_TOOL_COPY = {
         bestPractice: "Use a fresh grid capture and click immediately. Never infer coordinates from an old screenshot after scrolling or navigation."
     },
     browser_get_html: {
-        description: "Returns the current page's raw HTML, URL, and title. Large documents are chunked; continue with next_offset when has_more is true.",
+        description: "Returns sanitized HTML structure, URL, and title. Credential field values, scripts, and inline event handlers are excluded. Large documents are chunked; continue with next_offset when has_more is true.",
         params: { offset: "HTML character offset; use next_offset to continue." },
         bestPractice: "Use only when Markdown lacks a needed DOM attribute or selector; browser_get_markdown is the normal reading tool."
     },
@@ -1167,7 +1167,7 @@ const AI_TOOL_COPY = {
         description: "Fills 1-30 fields in one call, handling text, native selects, checkboxes, and native date inputs. Personal data prompts once for the whole form unless the owner enabled unattended mode. Password, OTP, and payment fields additionally require sensitive_fields permission and follow the client's credential-approval setting. Custom calendars and autocomplete choices need dedicated tools.",
         params: { fields: "Array of {selector, value} entries, up to 30." },
         fieldParams: { selector: "Field numeric ID or CSS selector.", value: "Text; option label for selects; 'true'/'false' for checkboxes; YYYY-MM-DD for native dates." },
-        bestPractice: "Read the form, bulk-fill ordinary fields, handle autocomplete and custom calendars separately, then read the form again before submitting."
+        bestPractice: "Read the form, bulk-fill ordinary fields, handle autocomplete and custom calendars separately, then read the form again before submitting. Filling verifies retained values after settlement. form_partially_filled and confirmed=false require inspecting results; do not submit or blindly repeat the batch."
     },
     browser_handle_dialog: {
         description: "Preconfigures how the next JavaScript alert, confirm, or prompt will be answered. Dialogs block page execution, so the decision must be set before repeating the action that opens one.",
@@ -1203,7 +1203,7 @@ const AI_TOOL_COPY = {
         bestPractice: "At the start of a shopping, travel, booking, or other supported task, check for a relevant shortcut. If selected, preserve it by calling browser_open_shortcut with shortcutId."
     },
     browser_open_shortcut: {
-        description: "Opens an operator-curated site selected by the AI from browser_list_shortcuts. The phone resolves shortcutId so the stored URL and affiliate parameters remain unchanged. It never selects a site automatically.",
+        description: "Opens an operator-curated site selected by the AI from browser_list_shortcuts. The phone resolves shortcutId so the stored URL and affiliate parameters remain unchanged. It never selects a site automatically. Page summaries require the device's read permission; read=true requires both navigate and read.",
         params: { shortcutId: "Stable ID from browser_list_shortcuts.", read: "When true, include Markdown in the response.", offset: "Markdown character offset when read=true.", tabId: "Optional target tab." },
         bestPractice: "Do not copy, search for, or rewrite the shortcut URL; pass shortcutId directly."
     },
